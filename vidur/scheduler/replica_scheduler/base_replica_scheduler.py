@@ -107,13 +107,9 @@ class BaseReplicaScheduler(ABC):
 
         if request.is_prefill_complete:
             return 1
-        lookup_result = self._replica_kv_cache.lookup(request.tokens)
-        '''
-        if lookup_result is not None:
-            print(len(lookup_result))
-        else:
-            print(lookup_result)
-        '''
+        lookup_result = None
+        if self._replica_kv_cache is not None:
+            lookup_result = self._replica_kv_cache.lookup(request.tokens)
         if lookup_result is not None:
             max_of_lookup_and_now = max(len(lookup_result), request.num_processed_tokens)
             request.set_num_processed_tokens(max_of_lookup_and_now)
@@ -157,7 +153,9 @@ class BaseReplicaScheduler(ABC):
             if num_tokens_this_batch + req.num_processed_tokens >= req.num_prefill_tokens:
                 insert_tokens = req.tokens
                 # Only cache prefill part, cos we only have content for it.
-                extraoverhead = self._replica_kv_cache.insert(insert_tokens)
+                extraoverhead = 0
+                if self._replica_kv_cache is not None:
+                    extraoverhead = self._replica_kv_cache.insert(insert_tokens)
                 # Now no extra overhead.
                 assert extraoverhead == 0
             idx += 1
