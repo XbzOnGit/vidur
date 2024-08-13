@@ -115,6 +115,7 @@ class BaseReplicaScheduler(ABC):
             request.set_num_processed_tokens(max_of_lookup_and_now)
         if request.num_processed_tokens >= request.num_prefill_tokens:
             request.set_prefill_complete(self._last_on_schedule_time)
+            return 1
         return request.num_prefill_tokens - request.num_processed_tokens
 
     def add_request(self, request: Request) -> None:
