@@ -11,6 +11,7 @@ from vidur.execution_time_predictor import BaseExecutionTimePredictor
 from vidur.logger import init_logger
 from vidur.scheduler.replica_stage_scheduler import ReplicaStageScheduler
 from vidur.scheduler.utils.memory_planner import MemoryPlanner
+from vidur.entities import Storage
 
 logger = init_logger(__name__)
 
@@ -30,7 +31,19 @@ class BaseReplicaScheduler(ABC):
         self._request_generator_config = request_generator_config
         self._replica_id = replica.id
         self._num_stages = num_stages
+        self._last_on_schedule_time = 0
 
+        # FIXME: Currently one storage(highest level) for one replica.
+        # FIXME: Now just prefix cache and lru.
+        available_memory = (
+            replica.total_memory_gb
+            * 1024**3
+            * (1 - replica.memory_margin_fraction)
+        )
+        # FIXME: assuming fp16.
+        # The second 2 for Key and Value.
+        self._replica_kv_cache = Storage(replica.id, int(replica_config.inter_req_kvcache_fraction * available_memory), "prefix", 
+                                         "lru", "discard", True, 2 * 2 * replica.attention_head_dim * replica.num_kv_heads)
         self._max_blocks_per_sequence = (
             self._request_generator_config.max_tokens // self._config.block_size
         )
@@ -53,7 +66,6 @@ class BaseReplicaScheduler(ABC):
         self._request_queue = []
         self._num_allocated_blocks = 0
         self._allocation_map = {}
-
         self._replica_stage_schedulers = {
             stage_id: ReplicaStageScheduler(
                 replica.id,
@@ -95,8 +107,19 @@ class BaseReplicaScheduler(ABC):
 
         if request.is_prefill_complete:
             return 1
-
-        return request.num_prefill_tokens
+        lookup_result = self._replica_kv_cache.lookup(request.tokens)
+        '''
+        if lookup_result is not None:
+            print(len(lookup_result))
+        else:
+            print(lookup_result)
+        '''
+        if lookup_result is not None:
+            max_of_lookup_and_now = max(len(lookup_result), request.num_processed_tokens)
+            request.set_num_processed_tokens(max_of_lookup_and_now)
+        if request.num_processed_tokens >= request.num_prefill_tokens:
+            request.set_prefill_complete(self._last_on_schedule_time)
+        return request.num_prefill_tokens - request.num_processed_tokens
 
     def add_request(self, request: Request) -> None:
         self._request_queue.append(request)
@@ -126,16 +149,31 @@ class BaseReplicaScheduler(ABC):
     def free_batch(self, batch: Batch) -> None:
         self.free(*batch.request_ids)
 
-    @abstractmethod
     def on_batch_end(self, batch: Batch) -> None:
+        # Insert some tokens into cache.
+        idx = 0
+        for req in batch.requests:
+            num_tokens_this_batch = batch.num_tokens[idx]
+            if num_tokens_this_batch + req.num_processed_tokens >= req.num_prefill_tokens:
+                insert_tokens = req.tokens
+                # Only cache prefill part, cos we only have content for it.
+                extraoverhead = self._replica_kv_cache.insert(insert_tokens)
+                # Now no extra overhead.
+                assert extraoverhead == 0
+            idx += 1
+        self.sub_on_batch_end(batch)
+
+    @abstractmethod
+    def sub_on_batch_end(self, batch: Batch) -> None:
         pass
 
     @abstractmethod
     def _get_next_batch(self) -> Batch:
         pass
 
-    def on_schedule(self) -> List[Batch]:
+    def on_schedule(self, timestamp) -> List[Batch]:
         scheduled_batches = []
+        self._last_on_schedule_time = timestamp
         while self._num_running_batches < self._num_stages:
             batch = self._get_next_batch()
             if not batch:

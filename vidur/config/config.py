@@ -470,6 +470,10 @@ class ReplicaConfig:
         default=0.1,
         metadata={"help": "Memory margin fraction."},
     )
+    inter_req_kvcache_fraction: float = field(
+        default=0.3,
+        metadata={"help": "inter request KV cache fraction."},
+    )
     num_pipeline_stages: int = field(
         default=4,
         metadata={"help": "Number of pipeline stages."},

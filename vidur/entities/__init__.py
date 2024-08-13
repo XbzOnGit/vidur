@@ -4,5 +4,6 @@ from vidur.entities.cluster import Cluster
 from vidur.entities.execution_time import ExecutionTime
 from vidur.entities.replica import Replica
 from vidur.entities.request import Request
+from vidur.entities.storage import Storage
 
-__all__ = [Request, Replica, Batch, Cluster, BatchStage, ExecutionTime]
+__all__ = [Request, Replica, Batch, Cluster, BatchStage, ExecutionTime, Storage]

@@ -29,7 +29,7 @@ class MemoryPlanner:
         available_memory = (
             self._replica.total_memory_gb
             * 1024**3
-            * (1 - self._replica.memory_margin_fraction)
+            * (1 - self._replica.memory_margin_fraction) * (1 - self._replica.inter_req_kvcache_fraction)
         )
         parameter_memory_per_device = self._get_parameter_memory_per_device()
         kv_cache_memory_per_device_per_request = (

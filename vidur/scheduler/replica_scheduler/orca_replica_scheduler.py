@@ -11,7 +11,7 @@ class OrcaReplicaScheduler(BaseReplicaScheduler):
         self._preempted_requests = []
         self._num_running_batches = 0
 
-    def on_batch_end(self, batch: Batch) -> None:
+    def sub_on_batch_end(self, batch: Batch) -> None:
         self._num_running_batches -= 1
 
         for request in batch.requests:

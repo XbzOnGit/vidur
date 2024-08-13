@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, List
 
 from vidur.entities.base_entity import BaseEntity
 from vidur.logger import init_logger
@@ -32,12 +32,14 @@ class Request(BaseEntity):
         num_prefill_tokens: int,
         num_decode_tokens: int,
         num_processed_tokens: int = 0,
+        tokens: List[str] = None,
     ):
         self._id = Request.generate_id()
         self._arrived_at = arrived_at
         self._num_prefill_tokens = num_prefill_tokens
         self._num_decode_tokens = num_decode_tokens
         self._num_processed_tokens = num_processed_tokens
+        self.tokens = tokens
 
         self._scheduled_at = 0
         self._execution_time = 0
@@ -198,6 +200,15 @@ class Request(BaseEntity):
     @property
     def has_started_decode(self) -> bool:
         return self._num_processed_tokens > self._num_prefill_tokens + 1
+    
+    # For KV cache.
+    def set_num_processed_tokens(self, num_processed_tokens: int) -> None:
+        self._num_processed_tokens = num_processed_tokens
+
+    def set_prefill_complete(self, timestamp):
+        self._is_prefill_complete = True
+        if self._prefill_completed_at == 0:
+            self._prefill_completed_at = timestamp
 
     def on_batch_schedule(
         self,

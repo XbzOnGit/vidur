@@ -12,7 +12,7 @@ class FasterTransformerReplicaScheduler(BaseReplicaScheduler):
         self._num_running_batches = 0
         self._pending_free_map = {}
 
-    def on_batch_end(self, batch: Batch) -> None:
+    def sub_on_batch_end(self, batch: Batch) -> None:
         self._num_running_batches -= 1
 
         if batch.all_requests_completed:

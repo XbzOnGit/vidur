@@ -23,7 +23,7 @@ class ReplicaScheduleEvent(BaseEvent):
         from vidur.events.batch_stage_arrival_event import BatchStageArrivalEvent
 
         replica_scheduler = scheduler.get_replica_scheduler(self._replica_id)
-        self._batches = replica_scheduler.on_schedule()
+        self._batches = replica_scheduler.on_schedule(self.time)
 
         if not self._batches:
             return []

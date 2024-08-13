@@ -37,10 +37,16 @@ class Simulator:
         self._metric_store = MetricsStore(
             self._config.metrics_config, self._config.cluster_config
         )
-        self._request_generator = RequestGeneratorRegistry.get(
-            self._config.request_generator_config.get_type(),
-            self._config.request_generator_config,
-        )
+        if hasattr(self._config, "external_trace_injected") and self._config.external_trace_injected:
+            assert hasattr(self._config, "external_trace")
+            assert type(self._config.external_trace) == list
+            self._request_generator = None
+            self._requests_injected = self._config.external_trace
+        else:
+            self._request_generator = RequestGeneratorRegistry.get(
+                self._config.request_generator_config.get_type(),
+                self._config.request_generator_config,
+            )
         self._scheduler = GlobalSchedulerRegistry.get(
             self._config.cluster_config.global_scheduler_config.get_type(),
             self._config,
@@ -104,7 +110,10 @@ class Simulator:
             self._add_event(event)
 
     def _init_event_queue(self) -> None:
-        requests = self._request_generator.generate()
+        if self._request_generator is not None:
+            requests = self._request_generator.generate()
+        else:
+            requests = self._requests_injected
 
         for request in requests:
             self._add_event(RequestArrivalEvent(request.arrived_at, request))
