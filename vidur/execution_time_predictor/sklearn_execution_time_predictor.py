@@ -675,6 +675,7 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
                 prefill_prefill_chunk_size_range,
             )
         )
+        # print(f"prediction_max_tokens_per_request: {self._config.prediction_max_tokens_per_request}\n\n")
 
         attention_df = pd.DataFrame(
             {
@@ -776,7 +777,6 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
             prefill_params.append((kv_cache_size, prefill_chunk_size))
 
         batch._prefill_params = prefill_params
-
         return prefill_params
 
     def _get_attention_layer_pre_proj_execution_time(self, batch: Batch) -> float:
@@ -859,7 +859,13 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
 
         agg_kv_cache_size = sum(kv_cache_sizes)
         agg_prefill_chunk_size = sum([x**2 for x in prefill_chunk_sizes]) ** 0.5
-
+        # max first key(agg_kv_cache_size) supported here is prediction_max_tokens_per_request.
+        # agg_kv_cache_size is always 0 when without KV cache.
+        if agg_kv_cache_size > self._config.prediction_max_tokens_per_request:
+            print(f"Exceeded, kv_cache_sizes: {kv_cache_sizes}, prefill_chunk_sizes: {prefill_chunk_sizes}")
+            for req in batch.requests:
+                print(f"num_processed_tokens of id {req.id}: {req.num_processed_tokens}")
+            print("graduality: ", self._config.kv_cache_prediction_granularity)
         return self._predictions["attn_prefill"][
             (agg_kv_cache_size, round(agg_prefill_chunk_size) ** 2)
         ] * (

@@ -3,7 +3,7 @@ import os
 from abc import ABC
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from vidur.config.base_poly_config import BasePolyConfig
 from vidur.config.device_sku_config import BaseDeviceSKUConfig
@@ -293,6 +293,18 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
     batch_size_cap: int = field(
         default=128,
         metadata={"help": "Maximum batch size cap."},
+    )
+    cache_lookup_type: Union[str, None] = field(
+        default=None,
+        metadata={"help": "Cache lookup type."},
+    )
+    cache_evict_type: Union[str, None] = field(
+        default=None,
+        metadata={"help": "Cache evict type."},
+    )
+    cache_evict_op: Union[str, None] = field(
+        default=None,
+        metadata={"help": "Cache evict operation."},
     )
 
 

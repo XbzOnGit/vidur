@@ -60,6 +60,7 @@ class Request(BaseEntity):
         self._is_prefill_complete = False
 
         self._num_restarts = 0
+        self._kv_cache_hit_length = 0
 
     @property
     def size(self) -> Tuple[int, int]:
@@ -201,6 +202,10 @@ class Request(BaseEntity):
     def has_started_decode(self) -> bool:
         return self._num_processed_tokens > self._num_prefill_tokens + 1
     
+    @property
+    def kv_cache_hit_length(self) -> bool:
+        return self._kv_cache_hit_length
+    
     # For KV cache.
     def set_num_processed_tokens(self, num_processed_tokens: int) -> None:
         self._num_processed_tokens = num_processed_tokens
@@ -209,6 +214,9 @@ class Request(BaseEntity):
         self._is_prefill_complete = True
         if self._prefill_completed_at == 0:
             self._prefill_completed_at = timestamp
+
+    def set_kv_cache_hit_length(self, set_len):
+        self._kv_cache_hit_length = set_len
 
     def on_batch_schedule(
         self,

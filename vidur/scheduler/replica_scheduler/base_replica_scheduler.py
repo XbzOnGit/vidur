@@ -42,8 +42,16 @@ class BaseReplicaScheduler(ABC):
         )
         # FIXME: assuming fp16.
         # The second 2 for Key and Value.
-        self._replica_kv_cache = Storage(replica.id, int(replica_config.inter_req_kvcache_fraction * available_memory), "prefix", 
-                                         "lru", "discard", True, 2 * 2 * replica.attention_head_dim * replica.num_kv_heads)
+        print(f"cache_lookup_type: {replica_scheduler_config.cache_lookup_type}")
+        print(f"cache_evict_type: {replica_scheduler_config.cache_evict_type}")
+        print(f"cache_evict_op: {replica_scheduler_config.cache_evict_op}")
+        self._replica_kv_cache = None
+        if replica_scheduler_config.cache_lookup_type is not None:
+            self._replica_kv_cache = Storage(replica.id, int(replica_config.inter_req_kvcache_fraction * available_memory), 
+                                            replica_scheduler_config.cache_lookup_type, 
+                                            replica_scheduler_config.cache_evict_type, 
+                                            replica_scheduler_config.cache_evict_op, 
+                                            True, 2 * 2 * replica.attention_head_dim * replica.num_kv_heads)
         self._max_blocks_per_sequence = (
             self._request_generator_config.max_tokens // self._config.block_size
         )
@@ -111,6 +119,9 @@ class BaseReplicaScheduler(ABC):
         if self._replica_kv_cache is not None:
             lookup_result = self._replica_kv_cache.lookup(request.tokens)
         if lookup_result is not None:
+            if len(lookup_result) != request.num_processed_tokens:
+                request.set_kv_cache_hit_length(len(lookup_result))
+                # print(f"request_id: {request.id}\nlookup hit with {len(lookup_result)} tokens\noriginally {request.num_processed_tokens} tokens processed\n")
             max_of_lookup_and_now = max(len(lookup_result), request.num_processed_tokens)
             request.set_num_processed_tokens(max_of_lookup_and_now)
         if request.num_processed_tokens >= request.num_prefill_tokens:

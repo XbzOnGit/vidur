@@ -1,13 +1,31 @@
 from typing import List, Union, Tuple
+import random
+import atexit
+from collections import deque
 
 from vidur.entities.base_entity import BaseEntity
-from vidur.entities.batch import Batch
 from vidur.logger import init_logger
 
 logger = init_logger(__name__)
 
+# TODO URGENT, FIXME: Should keep these following variables && functions in a class.
+# Cos there might be multiple storage instances.
+# For now, only one, so it is fine.
+
 lru_timestamp = 0
 lru_from_token_tuple_to_timestamp = {}
+fifo_queue_tokens = deque()
+random_evict_tokens = set()
+insert_cnt = 0
+evict_cnt = 0
+
+def print_stats():
+    logger.info("Storage stats:")
+    logger.info(f"insert_cnt: {insert_cnt}")
+    logger.info(f"evict_cnt: {evict_cnt}")
+
+atexit.register(print_stats)
+
 
 class TrieNode:
     def __init__(self, parent) -> None:
@@ -25,20 +43,56 @@ def _find_any_end_from_node(current: TrieNode) -> Tuple[List[str], TrieNode]:
         current = child
     return suffix_list, current
 
-def Trie_lookup_insert_lru_callback(key: List[str], node) -> None:
+def Trie_insert_lru_callback(key: List[str], node) -> None:
+    # Insert callback is called only when no hit or not a full hit.
+    # So key iself must be the longest.
+    # key == full_list
+    global lru_timestamp
+    # FIXME: Just for debugging, remove the redundant find and check.
+    suffix_list, _ = _find_any_end_from_node(node)
+    full_list = key + suffix_list
+    assert len(full_list) == len(key)
+    lru_from_token_tuple_to_timestamp[tuple(key)] = lru_timestamp
+
+def Trie_lookup_lru_callback(key: List[str], node) -> None:
     global lru_timestamp
     suffix_list, _ = _find_any_end_from_node(node)
     full_list = key + suffix_list
-    '''
-    if tuple(full_list) not in lru_from_token_tuple_to_timestamp:
-        print(f"Add a req with length {len(full_list)} to lru_from_token_tuple_to_timestamp with timestamp {lru_timestamp}")
-    '''
     lru_from_token_tuple_to_timestamp[tuple(full_list)] = lru_timestamp
+
     
 def Trie_delete_lru_callback(key: List[str], root) -> None:
-    # print(f"Delete a req with length {len(key)} from lru_from_token_tuple_to_timestamp with timestamp {lru_from_token_tuple_to_timestamp[tuple(key)]}")
     del lru_from_token_tuple_to_timestamp[tuple(key)]
 
+
+# Only insert and delete changes FIFO.
+def Trie_insert_fifo_callback(key: List[str], node) -> None:
+    global fifo_queue_tokens
+    # FIXME: Just for debugging, remove the redundant find and check.
+    suffix_list, _ = _find_any_end_from_node(node)
+    full_list = key + suffix_list
+    assert len(full_list) == len(key)
+    fifo_queue_tokens.append(key)
+
+def Trie_delete_fifo_callback(key: List[str], root) -> None:
+    global fifo_queue_tokens
+    # Called on eviction, so the key should be the first one.
+    assert len(fifo_queue_tokens) > 0
+    assert fifo_queue_tokens[0] == key
+    fifo_queue_tokens.popleft()
+
+def Trie_insert_random_callback(key: List[str], node) -> None:
+    global random_evict_tokens
+    # FIXME: Just for debugging, remove the redundant find and check.
+    suffix_list, _ = _find_any_end_from_node(node)
+    full_list = key + suffix_list
+    assert len(full_list) == len(key)
+    random_evict_tokens.add(tuple(key))
+
+def Trie_delete_random_callback(key: List[str], root) -> None:
+    global random_evict_tokens
+    assert tuple(key) in random_evict_tokens
+    random_evict_tokens.remove(tuple(key))
 
 class Trie:
     def __init__(self, lookup_callback, insert_callback, delete_callback) -> None:
@@ -49,7 +103,6 @@ class Trie:
     
     
     def lookup(self, key: List[str]) -> Union[List[str], None]:
-        global lru_timestamp
         current = self.root
         found_tokens = []
         for token in key:
@@ -65,7 +118,6 @@ class Trie:
         return found_tokens
 
     def insert(self, key: List[str]):
-        global lru_timestamp
         current = self.root
         for token in key:
             if token not in current.children:
@@ -74,6 +126,7 @@ class Trie:
         current.is_end = True
         if self.insert_callback is not None:
             # print("insert_callback")
+            # Called after trie is updated.
             self.insert_callback(key, current)
         
     def delete(self, key: List[str]):
@@ -118,6 +171,14 @@ def lru_evict_selection() -> List[str]:
     min_key = list(min_key)
     return min_key
 
+def random_evict_selection() -> List[str]:
+    global lru_from_token_tuple_to_timestamp
+    return random.choice(list(random_evict_tokens))
+
+def FIFO_evict_selection() -> List[str]:
+    global fifo_queue_tokens
+    return fifo_queue_tokens[0]
+
 def discard_evict_op(any):
     # Just nothing, no overhead.
     return 0
@@ -142,11 +203,21 @@ class Storage(BaseEntity):
             self._lookup_insert = prefix_insert
             self._lookup_delete = prefix_delete
             if evict_type == "lru":
-                self._lookup_storage = Trie(Trie_lookup_insert_lru_callback, Trie_lookup_insert_lru_callback, Trie_delete_lru_callback)
+                self._lookup_storage = Trie(Trie_lookup_lru_callback, Trie_insert_lru_callback, Trie_delete_lru_callback)
+            elif evict_type == "fifo":
+                self._lookup_storage = Trie(None, Trie_insert_fifo_callback, Trie_delete_fifo_callback)
+            elif evict_type == "random":
+                self._lookup_storage = Trie(None, Trie_insert_random_callback, Trie_delete_random_callback)
             else:
                 self._lookup_storage = Trie(None, None, None)
         if evict_type == "lru":
             self._evict_selection = lru_evict_selection
+            self._evict_storage = self._lookup_storage
+        elif evict_type == "fifo":
+            self._evict_selection = FIFO_evict_selection
+            self._evict_storage = self._lookup_storage
+        elif evict_type == "random":
+            self._evict_selection = random_evict_selection
             self._evict_storage = self._lookup_storage
         if evict_op == "discard":
             self._evict_op = discard_evict_op
@@ -162,7 +233,10 @@ class Storage(BaseEntity):
     
     def insert(self, key:List[str]):
         global lru_timestamp
+        global insert_cnt
+        global evict_cnt
         lru_timestamp += 1
+        insert_cnt += 1
         # Just lookup first.
         lookup_result = self.lookup(key)
         if lookup_result is not None:
@@ -178,8 +252,11 @@ class Storage(BaseEntity):
             extra_overhead += self._evict_op(evicted_one)
             freed_size = len(evicted_one) * self._space_per_token
             self._used_space -= freed_size
+            evict_cnt += 1
             assert self._used_space >= 0
         self._used_space += needed_size
+        # Insert is only called when key can hit but not fully hit.
+        # After eviction.
         self._lookup_insert(key, self._lookup_storage)
         return extra_overhead
 

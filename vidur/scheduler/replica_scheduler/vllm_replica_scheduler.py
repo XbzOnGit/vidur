@@ -48,6 +48,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
     def _allocate_request(self, request: Request) -> None:
         if request.id not in self._allocation_map:
             # new request
+            # Allocate for prefill.
             num_required_blocks = ceil(
                 (request.num_prefill_tokens) / self._config.block_size
             )
@@ -55,6 +56,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             return
 
         num_tokens_reserved = self._allocation_map[request.id] * self._config.block_size
+        # All processed tokens have KV cache.
         num_tokens_required = max(0, request.num_processed_tokens - num_tokens_reserved)
         assert (
             num_tokens_required == 0 or num_tokens_required == 1
@@ -69,6 +71,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
         requests = []
         num_tokens = []
         num_batch_tokens = 0
+        sum_of_processed_prefill_tokens = 0
 
         while self._request_queue:
             request = self._request_queue[0]
@@ -76,10 +79,30 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             next_num_tokens = self._get_request_next_num_tokens(request)
 
             if not self._can_allocate_request(request):
+                # At least have space for prefill.
                 break
 
             new_num_tokens = num_tokens + [next_num_tokens]
             new_num_batch_tokens = len(new_num_tokens) * max(new_num_tokens)
+            # Make more constraints on KV cache size used here.
+            # Original vidur does not have inter-request KV cache, so kv_size is 0 on prefill.
+
+            # FIXME: To make the execution time predictor happy, I have to make stronger constraints here.
+            # FIXME: This reduces batching.
+            # Make sum(num_processed_tokens) on prefill requests <= max_tokens_in_batch
+            if not request.is_prefill_complete:
+                gradulity_of_kv_cache_prediction = self._replica_stage_schedulers[0]._execution_time_predictor._config.kv_cache_prediction_granularity
+                sum_of_processed_prefill_tokens += (
+                    (
+                    request.num_processed_tokens + gradulity_of_kv_cache_prediction - 1
+                ) 
+                // gradulity_of_kv_cache_prediction 
+                ) * gradulity_of_kv_cache_prediction                
+            
+            if sum_of_processed_prefill_tokens > self._config.max_tokens_in_batch:
+                # print(f"sum_of_processed_prefill_tokens: {sum_of_processed_prefill_tokens} > {self._config.max_tokens_in_batch}")
+                break
+
             if new_num_batch_tokens > self._config.max_tokens_in_batch:
                 break
 
