@@ -39,6 +39,9 @@ class ReplicaStageScheduler:
 
         self._is_busy = True
         batch = self._batch_queue.pop(0)
+        # Should we put the step to modify the batch here?
+        # This can fit with underlaying device better.
+        # What's more, it will affect batching logic.
         execution_time = self._execution_time_predictor.get_execution_time(
             batch,
             self._stage_id,
