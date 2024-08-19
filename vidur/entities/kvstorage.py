@@ -8,30 +8,6 @@ from vidur.logger import init_logger
 
 logger = init_logger(__name__)
 
-'''
-def check_evict_space_consistency(evict_storage, declared_space, kv_size_per_token, trie):
-    total_calculated_size = 0
-    for key in evict_storage.keys():
-        total_calculated_size += len(key) * kv_size_per_token
-    if total_calculated_size != declared_space:
-        # Dump trie here,
-        trie_cnt = 0
-        trie_size = 0
-        current = trie.root
-        stack = [(current, [])]
-        while stack:
-            current, key = stack.pop()
-            if current.is_end:
-                trie_size += len(key) * kv_size_per_token
-                trie_cnt += 1
-            for token, child in current.children.items():
-                stack.append((child, key + [token]))
-        print(f"Total calculated size: {total_calculated_size}")
-        print(f"Total trie size: {trie_size}")
-        print(f"Total trie cnt: {trie_cnt}")
-        print(f"Declared space: {declared_space}")
-    assert total_calculated_size == declared_space
-'''
 class TrieNode:
     def __init__(self, parent, storage_id) -> None:
         self.children = {}
@@ -154,6 +130,7 @@ class Trie:
             self.insert_callback(key, current, lru_timestamp, evict_storage)
         
     def delete(self, key: List[str], evict_storage):
+        assert len(key) > 0
         current = self.root
         for token in key:
             if token not in current.children:
@@ -212,17 +189,22 @@ def FIFO_evict_selection(fifo_queue_tokens, pinned_set) -> List[str]:
 
 def discard_evict_op(storage, key: List[str]):
     return 0.0
-    
+
 def write_evict_op(storage, key: List[str]):
     lower_storage = storage.get_lower_storage()
     lookup_result, _ = lower_storage.lookup(key)
-    has_been_inside_lower = False
     if lookup_result is not None and len(lookup_result) == len(key):
-        has_been_inside_lower = True
         if storage.get_swap_out_once():
             # No overhead, no swap.
             # timestamp has been updated.
+            saved_time = storage.get_kv_size(key) / storage.thput_write_lower()
+            storage.add_swap_out_once_saved_time(saved_time)
             return 0.0
+        else:
+            # Still no eviction on lower storage, no real insertion.
+            # Just pretent to write to exactly original place.
+            # Timestamp has been updated on lookup.
+            return storage.get_kv_size(key) / storage.thput_write_lower()
     kv_size = storage.get_kv_size(key)
     overhead = 0.0
     if lower_storage.get_free_space() < kv_size:
@@ -230,10 +212,7 @@ def write_evict_op(storage, key: List[str]):
         overhead += lower_storage.evict(need_more_free_space)
     overhead += kv_size / storage.thput_write_lower()
     # print("Storage insert called in write_evict_op")
-    if not has_been_inside_lower:
-        # DO not actually insert again, just add the overhead.
-        # Timestamp has been updated on lookup.
-        assert lower_storage.insert(key) == 0
+    assert lower_storage.insert(key) == 0
     return overhead
     
 
@@ -376,6 +355,7 @@ class Storage(BaseEntity):
         self._total_eviction_time = 0
         self._total_fetch_time = 0
         self._swap_out_once = swap_out_once
+        self._swap_out_once_saved_time = 0.0
         # Make sure that the same KV cache only once.
         self._pinned_tokens = set()
         if look_up_type == "prefix":
@@ -412,6 +392,10 @@ class Storage(BaseEntity):
         logger.info(f"Storage stats with id {self._storage_id}:")
         logger.info(f"insert_cnt: {self._insert_cnt}")
         logger.info(f"evict_cnt: {self._evict_cnt}")
+        logger.info(f"swap_out_saved_time: {self._swap_out_once_saved_time}")
+    
+    def add_swap_out_once_saved_time(self, saved_time):
+        self._swap_out_once_saved_time += saved_time
 
     def lookup(self, key:List[str]):
         # check_evict_space_consistency(self._evict_storage, self._used_space, self._space_per_token, self._lookup_storage)
