@@ -61,7 +61,8 @@ class BatchStageEndEvent(BaseEvent):
             return next_events + [
                 BatchEndEvent(self.time, self._replica_id, self._batch)
             ]
-
+        # If is not the last stage, then reset states.
+        self._batch.reset_restore_between_stages()
         return next_events + [
             BatchStageArrivalEvent(
                 self.time,

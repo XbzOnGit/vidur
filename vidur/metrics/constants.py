@@ -51,6 +51,12 @@ class RequestMetricsTimeDistributions(enum.Enum):
     DECODE_TIME_EXECUTION_PLUS_PREEMPTION_NORMALIZED = (
         "decode_time_execution_plus_preemption_normalized"
     )
+    KV_CACHE_FETCH_TIME = (
+        "kv_cache_fetch_time"
+    )
+    KV_CACHE_TRIGGER_EVICTION_TIME = (
+        "kv_cache_trigger_eviction_time"
+    )
 
 
 class TokenMetricsTimeDistribution(enum.Enum):

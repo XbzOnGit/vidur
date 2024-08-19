@@ -61,6 +61,9 @@ class Request(BaseEntity):
 
         self._num_restarts = 0
         self._kv_cache_hit_length = 0
+        self._kv_fetch_time = 0.0
+        self._kv_insert_time = 0.0
+        self._kv_inserted = False
 
     @property
     def size(self) -> Tuple[int, int]:
@@ -206,6 +209,18 @@ class Request(BaseEntity):
     def kv_cache_hit_length(self) -> bool:
         return self._kv_cache_hit_length
     
+    @property
+    def kv_fetch_time(self) -> float:
+        return self._kv_fetch_time
+    
+    @property
+    def kv_insert_time(self) -> float:
+        return self._kv_insert_time
+    
+    @property
+    def kv_inserted(self) -> bool:
+        return self._kv_inserted
+
     # For KV cache.
     def set_num_processed_tokens(self, num_processed_tokens: int) -> None:
         self._num_processed_tokens = num_processed_tokens
@@ -214,9 +229,22 @@ class Request(BaseEntity):
         self._is_prefill_complete = True
         if self._prefill_completed_at == 0:
             self._prefill_completed_at = timestamp
+    
+    def reset_prefill_complete(self):
+        self._is_prefill_complete = False
+        self._prefill_completed_at = 0
 
     def set_kv_cache_hit_length(self, set_len):
         self._kv_cache_hit_length = set_len
+
+    def add_kv_fetch_time(self, fetch_time):
+        self._kv_fetch_time += fetch_time
+
+    def add_kv_insert_time(self, insert_time):
+        self._kv_insert_time += insert_time
+    
+    def set_kv_inserted(self, inserted):
+        self._kv_inserted = inserted
 
     def on_batch_schedule(
         self,
@@ -243,6 +271,7 @@ class Request(BaseEntity):
         time: float,
         num_tokens_processed: int,
     ) -> None:
+        # print(f"Request {self._id} from {self._num_processed_tokens} to {self._num_processed_tokens + num_tokens_processed}")
         self._num_processed_tokens += num_tokens_processed
         self._latest_iteration_completed_at = time
 

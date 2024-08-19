@@ -569,6 +569,12 @@ class MetricsStore:
             (request.completed_at - request.prefill_completed_at)
             / request.num_decode_tokens,
         )
+        self._request_metrics_time_distributions[RequestMetricsTimeDistributions.KV_CACHE_FETCH_TIME].put(
+            request.id, request.kv_fetch_time
+        )
+        self._request_metrics_time_distributions[RequestMetricsTimeDistributions.KV_CACHE_TRIGGER_EVICTION_TIME].put(
+            request.id, request.kv_insert_time
+        )
 
         self._request_metrics_histogram[
             RequestMetricsHistogram.REQUEST_NUM_RESTARTS

@@ -11,3 +11,5 @@ class EventType(BaseIntEnum):
     GLOBAL_SCHEDULE = 5
     REPLICA_SCHEDULE = 6
     REPLICA_STAGE_SCHEDULE = 7
+    COMM_ARRIVAL = 8
+    COMM_END = 9

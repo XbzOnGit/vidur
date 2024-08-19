@@ -26,6 +26,7 @@ class MemoryPlanner:
         )
 
     def get_max_batch_size(self) -> int:
+        # Should remove those left for inter request kv cache.
         available_memory = (
             self._replica.total_memory_gb
             * 1024**3

@@ -306,6 +306,28 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default=None,
         metadata={"help": "Cache evict operation."},
     )
+    cpu_memory_size: str = field(
+        default="",
+        metadata={"help": "CPU memory size."},
+    )
+    swap_out_once: str = field(
+        default="True",
+        metadata={"help": "Swap out once."},
+    )
+    gpu_cpu_thput: str = field(
+        default="",
+        metadata={"help": "GPU CPU throughput."},
+    )
+    cpu_gpu_thput: str = field(
+        default="",
+        metadata={"help": "CPU GPU throughput."},
+    )
+    cache_choice_strategy: str = field(
+        default="longer",
+        metadata={"help": "Cache choice strategy."},
+    )
+
+
 
 
 @dataclass

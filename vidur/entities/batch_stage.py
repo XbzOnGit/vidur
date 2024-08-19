@@ -25,6 +25,8 @@ class BatchStage(BaseEntity):
         pipeline_stage: int,
         execution_time: float,
         model_execution_time: float,
+        kv_fetch_time: float,
+        kv_insert_time: float,
         requests: List[Request],
         num_tokens: List[Request],
     ) -> None:
@@ -37,6 +39,8 @@ class BatchStage(BaseEntity):
         self._pipeline_stage = pipeline_stage
         self._execution_time = execution_time
         self._model_execution_time = model_execution_time
+        self._kv_fetch_time = kv_fetch_time
+        self._kv_insert_time = kv_insert_time
 
         self._scheduled_at = None
         self._completed_at = None
@@ -63,6 +67,14 @@ class BatchStage(BaseEntity):
     @property
     def model_execution_time(self) -> float:
         return self._model_execution_time
+    
+    @property
+    def kv_fetch_time(self) -> float:
+        return self._kv_fetch_time
+    
+    @property
+    def kv_insert_time(self) -> float:
+        return self._kv_insert_time
 
     @property
     def pipeline_stage(self) -> int:
@@ -95,8 +107,8 @@ class BatchStage(BaseEntity):
         time: float,
     ) -> None:
         assert (
-            time == self._scheduled_at + self._execution_time
-        ), f"{time} != {self._scheduled_at} + {self._execution_time}"
+            time == self._scheduled_at + self._execution_time + self._kv_fetch_time + self._kv_insert_time
+        ), f"{time} != {self._scheduled_at} + {self._execution_time} + {self._kv_fetch_time} + {self._kv_insert_time}"
 
         self._completed_at = time
 

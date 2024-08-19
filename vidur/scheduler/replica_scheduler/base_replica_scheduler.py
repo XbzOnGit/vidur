@@ -11,11 +11,32 @@ from vidur.execution_time_predictor import BaseExecutionTimePredictor
 from vidur.logger import init_logger
 from vidur.scheduler.replica_stage_scheduler import ReplicaStageScheduler
 from vidur.scheduler.utils.memory_planner import MemoryPlanner
-from vidur.entities import Storage
+from vidur.entities import Storage, StorageController
 
 logger = init_logger(__name__)
 
 
+def _parse_memory_size(memory_str: str) -> int:
+    memory_str = memory_str.upper()
+    if memory_str.endswith("GB"):
+        return int(memory_str[:-2]) * 1024**3
+    if memory_str.endswith("MB"):
+        return int(memory_str[:-2]) * 1024**2
+    if memory_str.endswith("KB"):
+        return int(memory_str[:-2]) * 1024
+    return int(memory_str)
+
+def _parse_thput(thput_str: str) -> float:
+    thput_str = thput_str.upper()
+    if thput_str.endswith("GB/S"):
+        return float(thput_str[:-4]) * 1024**3
+    if thput_str.endswith("MB/S"):
+        return float(thput_str[:-4]) * 1024**2
+    if thput_str.endswith("KB/S"):
+        return float(thput_str[:-4]) * 1024
+    return float(thput_str)
+
+global_storage_id = 0
 class BaseReplicaScheduler(ABC):
     def __init__(
         self,
@@ -40,18 +61,49 @@ class BaseReplicaScheduler(ABC):
             * 1024**3
             * (1 - replica.memory_margin_fraction)
         )
+        available_memory_per_stage = available_memory // num_stages
         # FIXME: assuming fp16.
         # The second 2 for Key and Value.
         print(f"cache_lookup_type: {replica_scheduler_config.cache_lookup_type}")
         print(f"cache_evict_type: {replica_scheduler_config.cache_evict_type}")
         print(f"cache_evict_op: {replica_scheduler_config.cache_evict_op}")
-        self._replica_kv_cache = None
+        print(f"space per token on one stage: {(2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages}")
+        self._replica_kv_controllers = []
         if replica_scheduler_config.cache_lookup_type is not None:
-            self._replica_kv_cache = Storage(replica.id, int(replica_config.inter_req_kvcache_fraction * available_memory), 
-                                            replica_scheduler_config.cache_lookup_type, 
-                                            replica_scheduler_config.cache_evict_type, 
-                                            replica_scheduler_config.cache_evict_op, 
-                                            True, 2 * 2 * replica.attention_head_dim * replica.num_kv_heads)
+            global global_storage_id
+            controller = StorageController(replica_scheduler_config.cache_choice_strategy)
+            self._replica_kv_controllers.append(controller)
+            # Space per token for each stage(each node).
+            space_per_token = (2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages
+            controller.set_kv_size_per_token(space_per_token)
+            swap_out_once = True if replica_scheduler_config.swap_out_once.upper() == "TRUE" else False
+            # Here no per TP, cos considered together.
+            highest_storage = Storage(global_storage_id, int(replica_config.inter_req_kvcache_fraction * available_memory_per_stage), 
+                        replica_scheduler_config.cache_lookup_type,
+                        replica_scheduler_config.cache_evict_type,
+                        replica_scheduler_config.cache_evict_op,
+                        True, space_per_token,
+                        swap_out_once)
+            controller.add_storage(highest_storage)
+            if len(replica_scheduler_config.cpu_memory_size) > 0:
+                global_storage_id += 1
+                cpu_memory_size = _parse_memory_size(replica_scheduler_config.cpu_memory_size)
+                # FIXME: More diverse setup and more layers.
+                # Same lookup and same eviction policy
+                cpu_memory = Storage(global_storage_id, cpu_memory_size, replica_scheduler_config.cache_lookup_type,
+                                     replica_scheduler_config.cache_evict_type,
+                                     "discard", False, space_per_token, False)
+                assert len(replica_scheduler_config.cpu_gpu_thput) > 0
+                assert len(replica_scheduler_config.gpu_cpu_thput) > 0
+                cpu_gpu_thput = _parse_thput(replica_scheduler_config.cpu_gpu_thput)
+                gpu_cpu_thput = _parse_thput(replica_scheduler_config.gpu_cpu_thput)
+                highest_storage.set_lower_storage(cpu_memory, cpu_gpu_thput, gpu_cpu_thput)
+                controller.add_storage(cpu_memory)
+            
+            global_storage_id += 1
+        else:
+            for _ in range(num_stages):
+                self._replica_kv_controllers.append(None)
         self._max_blocks_per_sequence = (
             self._request_generator_config.max_tokens // self._config.block_size
         )
@@ -80,6 +132,7 @@ class BaseReplicaScheduler(ABC):
                 stage_id,
                 stage_id == num_stages - 1,
                 execution_time_predictor,
+                self._replica_kv_controllers[stage_id],
             )
             for stage_id in range(num_stages)
         }
@@ -109,25 +162,13 @@ class BaseReplicaScheduler(ABC):
                 for stage_scheduler in self._replica_stage_schedulers.values()
             )
         )
-
     def _get_request_next_num_tokens(self, request: Request) -> int:
         assert not request.completed
 
         if request.is_prefill_complete:
             return 1
-        lookup_result = None
-        if self._replica_kv_cache is not None:
-            lookup_result = self._replica_kv_cache.lookup(request.tokens)
-        if lookup_result is not None:
-            if len(lookup_result) != request.num_processed_tokens:
-                request.set_kv_cache_hit_length(len(lookup_result))
-                # print(f"request_id: {request.id}\nlookup hit with {len(lookup_result)} tokens\noriginally {request.num_processed_tokens} tokens processed\n")
-            max_of_lookup_and_now = max(len(lookup_result), request.num_processed_tokens)
-            request.set_num_processed_tokens(max_of_lookup_and_now)
-        if request.num_processed_tokens >= request.num_prefill_tokens:
-            request.set_prefill_complete(self._last_on_schedule_time)
-            return 1
-        return request.num_prefill_tokens - request.num_processed_tokens
+
+        return request.num_prefill_tokens
 
     def add_request(self, request: Request) -> None:
         self._request_queue.append(request)
@@ -158,19 +199,6 @@ class BaseReplicaScheduler(ABC):
         self.free(*batch.request_ids)
 
     def on_batch_end(self, batch: Batch) -> None:
-        # Insert some tokens into cache.
-        idx = 0
-        for req in batch.requests:
-            num_tokens_this_batch = batch.num_tokens[idx]
-            if num_tokens_this_batch + req.num_processed_tokens >= req.num_prefill_tokens:
-                insert_tokens = req.tokens
-                # Only cache prefill part, cos we only have content for it.
-                extraoverhead = 0
-                if self._replica_kv_cache is not None:
-                    extraoverhead = self._replica_kv_cache.insert(insert_tokens)
-                # Now no extra overhead.
-                assert extraoverhead == 0
-            idx += 1
         self.sub_on_batch_end(batch)
 
     @abstractmethod
