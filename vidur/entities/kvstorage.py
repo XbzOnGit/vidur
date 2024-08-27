@@ -11,8 +11,6 @@ from vidur.logger import init_logger
 
 logger = init_logger(__name__)
 
-debugging_req0_tokens = []
-debugging_insert_tokens = []
 
 '''
 1. Feed a batch stage with batch info into thsi controller.
@@ -82,8 +80,6 @@ class KVStorageController(BaseEntity):
 
         bidx = 0
         for request in batch_to_hack.requests:
-            if request.id == 0:
-                debugging_req0_tokens = request.tokens
             if request.num_processed_tokens % self._block_size != 0:
                 assert request.id in self._active_blocks
             # Number of tokens to lookup should be 
@@ -125,16 +121,20 @@ class KVStorageController(BaseEntity):
                     # This is because the preload of this batch should be together
                     # And preload of last batch should be done before this batch cos it is before execution of last batch.
             hit_length = len(hit_trace) - 1
-            assert request.num_processed_tokens // self._block_size <= hit_length, f"{request.num_processed_tokens} // {self._block_size} > {hit_length}, id is {request.id}\n{len(debugging_req0_tokens)}\n{len(debugging_insert_tokens)}"
-            current_active_block = math.ceil((request.num_processed_tokens + batch_to_hack.num_tokens[bidx] - 
-                                    hit_length * self._block_size) / self._block_size )
-            current_full_blocks = (request.num_processed_tokens + batch_to_hack.num_tokens[bidx]) // self._block_size
+            assert request.num_processed_tokens // self._block_size <= hit_length, f"{request.num_processed_tokens} // {self._block_size} > {hit_length}, id is {request.id}"
+            # NOTE: It can be one more token, if prefill ends.
+            curent_tokens_after_this = request.num_processed_tokens + batch_to_hack.num_tokens[bidx]
+            if curent_tokens_after_this == request.num_prefill_tokens:
+                curent_tokens_after_this += 1
+            current_active_block = math.ceil((curent_tokens_after_this - 
+                                    hit_length * self._block_size) / self._block_size)
+            current_full_blocks = curent_tokens_after_this // self._block_size
             previous_have_blocks = hit_length
+            previous_full_blocks = request.num_processed_tokens // self._block_size
             last_virtual_full_block = hit_trace[len(hit_trace) - 1]
             if current_full_blocks > previous_have_blocks:
                 for i in range(previous_have_blocks, current_full_blocks):
                     assert (i + 1) * self._block_size <= len(request.tokens), f"{((i + 1) * self._block_size)} > {len(request.tokens)}"
-                    # TODO: Fix the bug here, SHOULD MODIFY ALL ABOUT NEW_FULL
                     current_virtual_full_block = KVBlockTrieNode(last_virtual_full_block, 
                                                                  tuple(request.tokens[i * self._block_size: (i + 1) * self._block_size]),
                                                                  self._kv_block_trie)
@@ -355,24 +355,6 @@ class KVStorageController(BaseEntity):
         return end_write, end_firlay_write, per_layer_write_time
 
     
-    def _insert_with_enough_space(self, kvblock: KVBlock, parent_node: KVBlockTrieNode, end_time, end_firlayer_time,
-                                   refcnt_inc: bool):
-        # Remember the color problem.
-        # Now always layer 0.
-        # If already inside, skip.
-        the_node = None
-        if tuple(kvblock.tokens) in parent_node.children \
-            and parent_node.children[tuple(kvblock.tokens)].check_if_color_present(0):
-            the_node = parent_node.children[tuple(kvblock.tokens)]
-            # assert False
-        else:
-            # Now insert.
-            # Inside this, eviction list is modified.
-            # And color is marked.
-            the_node = self._kv_block_trie.insert_full_block(parent_node, kvblock, 0, end_time, end_firlayer_time)
-        if refcnt_inc:
-            the_node.add_ref()
-        return the_node
     
     def _insert_with_prepared_node_and_space_into_layer0(self, the_node: KVBlockTrieNode, end_time, end_firlayer_time, refcnt_inc: bool):
         parent_node = the_node.parent
@@ -396,8 +378,6 @@ class KVStorageController(BaseEntity):
             assert self._active_blocks[reqid] > 0, f"{self._active_blocks[reqid]}, reqid: {reqid}"
             self._active_blocks[reqid] -= 1
             release_cnt += 1
-            if reqid == 0:
-                debugging_insert_tokens.extend(the_node.tokens)
                 
         self._kv_block_trie.release_active_block_for_highest_level(release_cnt)
         # Must insert in order.

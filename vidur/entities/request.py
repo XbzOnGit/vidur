@@ -285,6 +285,8 @@ class Request(BaseEntity):
             self._is_prefill_complete = True
             # we get one decode token when the prefill processing completes
             self._num_processed_tokens += 1
+            # Here is possible to add one more block.
+            # So do this in kvstorage.
 
             # we must record the prefill completion time only in the first time
             # in the subsequent restarts, we keep adding the previously decoded
