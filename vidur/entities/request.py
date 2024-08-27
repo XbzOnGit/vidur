@@ -298,7 +298,8 @@ class Request(BaseEntity):
             self._completed = True
             for kv_controller in self._replica_scheduler.get_all_kv_controllers():
                 # print(f"Request {self._id} completed")
-                kv_controller.request_callback_on_restart_and_complete(self)
+                if kv_controller is not None:
+                    kv_controller.request_callback_on_restart_and_complete(self)
             logger.debug(f"Request {self._id} completed at {self._completed_at}")
 
     def on_batch_stage_schedule(
@@ -368,4 +369,5 @@ class Request(BaseEntity):
         self._kv_insert_time = 0
         for kv_controller in self._replica_scheduler.get_all_kv_controllers():
             # print(f"Request {self._id} restarting")
-            kv_controller.request_callback_on_restart_and_complete(self)
+            if kv_controller is not None:
+                kv_controller.request_callback_on_restart_and_complete(self)

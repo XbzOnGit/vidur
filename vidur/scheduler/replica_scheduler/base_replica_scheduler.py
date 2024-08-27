@@ -68,6 +68,7 @@ class BaseReplicaScheduler(ABC):
         print(f"cache_evict_op: {replica_scheduler_config.cache_evict_op}")
         print(f"space per token on one stage: {(2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages}")
         self._replica_kv_controllers = []
+        read_buffer_fraction = 0.0
         if replica_scheduler_config.cache_lookup_type is not None:
             layer_pipeline = True if replica_scheduler_config.layer_pipeline.upper() == "TRUE" else False
             gpu_write_through_cpu = True if replica_scheduler_config.gpu_write_through_cpu.upper() == "TRUE" else False

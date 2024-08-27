@@ -51,8 +51,9 @@ class ReplicaStageScheduler:
         batch = self._batch_queue.pop(0)
         # Now just synchoronously fetch and insert.
         # Do fetch, execute, insert here.
-
-        ready_exec_timeinfo, new_full_blocks_list =  self._kv_cache_controller.on_batch_stage(batch, timestamp)
+        ready_exec_timeinfo = (timestamp, 0.0)
+        if self._kv_cache_controller is not None:
+            ready_exec_timeinfo, new_full_blocks_list =  self._kv_cache_controller.on_batch_stage(batch, timestamp)
         start_first_exec_time, load_per_layer_time = ready_exec_timeinfo
 
 
@@ -62,38 +63,42 @@ class ReplicaStageScheduler:
             batch,
             self._stage_id,
         )
-        per_layer_execution_time = execution_time.total_time / self._kv_cache_controller.num_layers
-        end_execution_time = None
-        end_last_exec_time = timestamp
-        end_last_preload_time = start_first_exec_time
-        end_exec_of_first_layer = None
-        
-        assert timestamp <= start_first_exec_time, f"{timestamp} > {start_first_exec_time}"
-        async_write_list = []
-        for _ in range(self._kv_cache_controller.num_layers):
-            start_this_exec_time = max(end_last_exec_time, end_last_preload_time)
-            end_this_exec_time = start_this_exec_time + per_layer_execution_time
-            if end_exec_of_first_layer is None:
-                end_exec_of_first_layer = end_this_exec_time
-            # Launch async write.
-            if self._kv_cache_controller._gpu_write_through_cpu:
-                # Has filtered to not present in CPU in write_through inside this function.
-                end_aw, end_faw, end_per_aw = \
-                    self._kv_cache_controller.write_through_async_to_CPU(new_full_blocks_list, end_this_exec_time, 1)
-                assert end_aw == end_faw, f"{end_aw} != {end_faw}"
-                async_write_list.append(end_aw)
-            end_last_exec_time = end_this_exec_time
-            end_last_preload_time += load_per_layer_time
-        end_execution_time = end_last_exec_time
-        if len(new_full_blocks_list) > 0:
-            self._kv_cache_controller.switch_active_fullblocks_into_cache(new_full_blocks_list, 
-                                                                      end_execution_time, end_exec_of_first_layer)
-            if self._kv_cache_controller._gpu_write_through_cpu:
-                assert len(async_write_list) == self._kv_cache_controller.num_layers
-                # Set present time in CPU.
-                self._kv_cache_controller.set_full_block_present_in_after_async_write(new_full_blocks_list, 
-                                                                                      async_write_list[-1],
-                                                                                      async_write_list[0])
+        if self._kv_cache_controller is not None:
+            per_layer_execution_time = execution_time.total_time / self._kv_cache_controller.num_layers
+            end_execution_time = None
+            end_last_exec_time = timestamp
+            end_last_preload_time = start_first_exec_time
+            end_exec_of_first_layer = None
+            
+            assert timestamp <= start_first_exec_time, f"{timestamp} > {start_first_exec_time}"
+            async_write_list = []
+            for _ in range(self._kv_cache_controller.num_layers):
+                start_this_exec_time = max(end_last_exec_time, end_last_preload_time)
+                end_this_exec_time = start_this_exec_time + per_layer_execution_time
+                if end_exec_of_first_layer is None:
+                    end_exec_of_first_layer = end_this_exec_time
+                # Launch async write.
+                if self._kv_cache_controller._gpu_write_through_cpu:
+                    # Has filtered to not present in CPU in write_through inside this function.
+                    end_aw, end_faw, end_per_aw = \
+                        self._kv_cache_controller.write_through_async_to_CPU(new_full_blocks_list, end_this_exec_time, 1)
+                    assert end_aw == end_faw, f"{end_aw} != {end_faw}"
+                    async_write_list.append(end_aw)
+                end_last_exec_time = end_this_exec_time
+                end_last_preload_time += load_per_layer_time
+            end_execution_time = end_last_exec_time
+            if len(new_full_blocks_list) > 0:
+                self._kv_cache_controller.switch_active_fullblocks_into_cache(new_full_blocks_list, 
+                                                                        end_execution_time, end_exec_of_first_layer)
+                if self._kv_cache_controller._gpu_write_through_cpu:
+                    assert len(async_write_list) == self._kv_cache_controller.num_layers
+                    # Set present time in CPU.
+                    self._kv_cache_controller.set_full_block_present_in_after_async_write(new_full_blocks_list, 
+                                                                                        async_write_list[-1],
+                                                                                        async_write_list[0])
+        else:
+            end_execution_time = start_first_exec_time + execution_time.total_time
+            new_full_blocks_list = []
         total_execution_time = end_execution_time - timestamp
         model_execution_time = execution_time.model_time
         batch_stage = BatchStage(
