@@ -220,6 +220,9 @@ class Request(BaseEntity):
     @property
     def kv_inserted(self) -> bool:
         return self._kv_inserted
+    
+    def set_replica_scheduler(self, replica_scheduler):
+        self._replica_scheduler = replica_scheduler
 
     # For KV cache.
     def set_num_processed_tokens(self, num_processed_tokens: int) -> None:
@@ -235,6 +238,7 @@ class Request(BaseEntity):
         self._prefill_completed_at = 0
 
     def set_kv_cache_hit_length(self, set_len):
+        # print(f"Request {self._id} set kv cache hit length to {set_len}")
         self._kv_cache_hit_length = set_len
 
     def add_kv_fetch_time(self, fetch_time):
@@ -292,6 +296,9 @@ class Request(BaseEntity):
         if self._num_processed_tokens == self.total_tokens:
             self._completed_at = time
             self._completed = True
+            for kv_controller in self._replica_scheduler.get_all_kv_controllers():
+                # print(f"Request {self._id} completed")
+                kv_controller.request_callback_on_restart_and_complete(self)
             logger.debug(f"Request {self._id} completed at {self._completed_at}")
 
     def on_batch_stage_schedule(
@@ -355,3 +362,10 @@ class Request(BaseEntity):
         self._is_prefill_complete = False
 
         self._num_restarts += 1
+        self._kv_cache_hit_length = 0
+        self._kv_inserted = False
+        self._kv_fetch_time = 0
+        self._kv_insert_time = 0
+        for kv_controller in self._replica_scheduler.get_all_kv_controllers():
+            # print(f"Request {self._id} restarting")
+            kv_controller.request_callback_on_restart_and_complete(self)

@@ -111,31 +111,28 @@ class Batch(BaseEntity):
     def all_requests_completed(self) -> bool:
         return all([request.completed for request in self._requests])
     
-    @property
-    def restore_between_stages(self) -> bool:
-        return self._restore_between_stages
     
     def set_restore_between_stages(self, kv_hit_length_list, num_processed_tokens_list, 
                                    should_reset_prefill_complete_list, 
-                                   batch_num_tokens_list, should_reset_kv_inserted_list) -> None:
+                                   batch_num_tokens_list, new_full_blocks_list) -> None:
         self._kv_hit_length_list = kv_hit_length_list
         self._num_processed_tokens_list = num_processed_tokens_list
         self._should_reset_prefill_complete_list = should_reset_prefill_complete_list
         self._batch_num_tokens_list = batch_num_tokens_list
-        self._should_reset_kv_inserted_list = should_reset_kv_inserted_list
+        self._new_full_blocks_list = new_full_blocks_list
         
     def reset_restore_between_stages(self) -> None:
         # Only called on cache enabled && not the last stage.
         bidx = 0
-        for request, kv_hit_length, num_processed_tokens, should_reset_prefill_complete, batch_num_tokens, should_reset_kv_inserted in zip(self._requests, self._kv_hit_length_list, self._num_processed_tokens_list, self._should_reset_prefill_complete_list, self._batch_num_tokens_list, self._should_reset_kv_inserted_list):
+        for request, kv_hit_length, num_processed_tokens, should_reset_prefill_complete, batch_num_tokens in zip(self._requests, self._kv_hit_length_list, self._num_processed_tokens_list, self._should_reset_prefill_complete_list, self._batch_num_tokens_list):
             request.set_kv_cache_hit_length(kv_hit_length)
             request.set_num_processed_tokens(num_processed_tokens)
             if should_reset_prefill_complete:
                 request.reset_prefill_complete()
             self._num_tokens[bidx] = batch_num_tokens
-            if should_reset_kv_inserted:
-                request.reset_kv_inserted()
             bidx += 1
+        # Do not reset other states for full blocks.
+        self._new_full_blocks_list = None
 
 
     def on_schedule(
@@ -162,6 +159,7 @@ class Batch(BaseEntity):
     @property
     def completed_requests(self) -> List[Request]:
         return [request for request in self._requests if request.completed]
+    
 
     def to_dict(self) -> dict:
         return {

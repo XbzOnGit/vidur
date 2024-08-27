@@ -282,6 +282,7 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default=0.01,
         metadata={"help": "Watermark blocks fraction."},
     )
+    # Always paged attention.
     block_size: int = field(
         default=16,
         metadata={"help": "Block size."},
@@ -310,10 +311,6 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default="",
         metadata={"help": "CPU memory size."},
     )
-    swap_out_once: str = field(
-        default="True",
-        metadata={"help": "Swap out once."},
-    )
     gpu_cpu_thput: str = field(
         default="",
         metadata={"help": "GPU CPU throughput."},
@@ -322,9 +319,25 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default="",
         metadata={"help": "CPU GPU throughput."},
     )
-    cache_choice_strategy: str = field(
-        default="longer",
-        metadata={"help": "Cache choice strategy."},
+    layer_pipeline: str = field(
+        default="TRUE",
+        metadata={"help": "Layer pipeline."},
+    )
+    read_pipeline_buffer: str = field(
+        default="TRUE",
+        metadata={"help": "Read pipeline buffer."},
+    )
+    gpu_write_through_cpu: str = field(
+        default="TRUE",
+        metadata={"help": "GPU write through CPU."},
+    )
+    read_buffer_fraction: float = field(
+        default=0.1,
+        metadata={"help": "Read buffer fraction."},
+    )
+    cpu_sysbuf_fraction: float = field(
+        default=0.1,
+        metadata={"help": "CPU sysbuf fraction."},
     )
 
 
@@ -504,9 +517,11 @@ class ReplicaConfig:
         default=0.1,
         metadata={"help": "Memory margin fraction."},
     )
-    inter_req_kvcache_fraction: float = field(
-        default=0.3,
-        metadata={"help": "inter request KV cache fraction."},
+    # This fraction will be reserved for inter request cache.
+    # Will not be used for compuation batch size decision.
+    gpu_cache_only_fraction: float = field(
+        default=0.0,
+        metadata={"help": "GPU cache only fraction."},
     )
     num_pipeline_stages: int = field(
         default=4,

@@ -7,6 +7,9 @@ from vidur.scheduler.replica_scheduler.base_replica_scheduler import (
 )
 
 
+# allocate and free by requests.
+# only freed when the request is completed or restarted(when preempted).
+
 class VLLMReplicaScheduler(BaseReplicaScheduler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -115,6 +118,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             request = self._preempted_requests.pop(0)
 
             while not self._can_allocate_request(request):
+                # Free up space for the selected one if possible.
                 if self._preempted_requests:
                     victim_request = self._preempted_requests.pop(-1)
                     victim_request.restart()

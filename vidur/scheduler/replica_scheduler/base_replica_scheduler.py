@@ -11,7 +11,7 @@ from vidur.execution_time_predictor import BaseExecutionTimePredictor
 from vidur.logger import init_logger
 from vidur.scheduler.replica_stage_scheduler import ReplicaStageScheduler
 from vidur.scheduler.utils.memory_planner import MemoryPlanner
-from vidur.entities import Storage, StorageController
+from vidur.entities import KVStorageController
 
 logger = init_logger(__name__)
 
@@ -36,7 +36,6 @@ def _parse_thput(thput_str: str) -> float:
         return float(thput_str[:-4]) * 1024
     return float(thput_str)
 
-global_storage_id = 0
 class BaseReplicaScheduler(ABC):
     def __init__(
         self,
@@ -70,45 +69,48 @@ class BaseReplicaScheduler(ABC):
         print(f"space per token on one stage: {(2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages}")
         self._replica_kv_controllers = []
         if replica_scheduler_config.cache_lookup_type is not None:
-            global global_storage_id
-            controller = StorageController(replica_scheduler_config.cache_choice_strategy)
+            layer_pipeline = True if replica_scheduler_config.layer_pipeline.upper() == "TRUE" else False
+            gpu_write_through_cpu = True if replica_scheduler_config.gpu_write_through_cpu.upper() == "TRUE" else False
+            read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
+            read_buffer_fraction = replica_scheduler_config.read_buffer_fraction
+            cpu_sysbuf_fraction = replica_scheduler_config.cpu_sysbuf_fraction
+            controller = KVStorageController(replica_scheduler_config.block_size, layer_pipeline, replica.num_layers // num_stages,
+                                             read_pipeline_buffer, gpu_write_through_cpu)
             self._replica_kv_controllers.append(controller)
             # Space per token for each stage(each node).
             space_per_token = (2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages
-            controller.set_kv_size_per_token(space_per_token)
-            swap_out_once = True if replica_scheduler_config.swap_out_once.upper() == "TRUE" else False
+            space_per_token_per_layer = space_per_token // replica.num_layers
+            space_per_block = replica_scheduler_config.block_size * space_per_token
             # Here no per TP, cos considered together.
-            highest_storage = Storage(global_storage_id, int(replica_config.inter_req_kvcache_fraction * available_memory_per_stage), 
-                        replica_scheduler_config.cache_lookup_type,
-                        replica_scheduler_config.cache_evict_type,
-                        replica_scheduler_config.cache_evict_op,
-                        True, space_per_token,
-                        swap_out_once)
-            controller.add_storage(highest_storage)
-            if len(replica_scheduler_config.cpu_memory_size) > 0:
-                global_storage_id += 1
-                cpu_memory_size = _parse_memory_size(replica_scheduler_config.cpu_memory_size)
-                # FIXME: More diverse setup and more layers.
-                # Same lookup and same eviction policy
-                cpu_memory = Storage(global_storage_id, cpu_memory_size, replica_scheduler_config.cache_lookup_type,
-                                     replica_scheduler_config.cache_evict_type,
-                                     "discard", False, space_per_token, False)
-                assert len(replica_scheduler_config.cpu_gpu_thput) > 0
-                assert len(replica_scheduler_config.gpu_cpu_thput) > 0
-                cpu_gpu_thput = _parse_thput(replica_scheduler_config.cpu_gpu_thput)
-                gpu_cpu_thput = _parse_thput(replica_scheduler_config.gpu_cpu_thput)
-                highest_storage.set_lower_storage(cpu_memory, cpu_gpu_thput, gpu_cpu_thput)
-                controller.add_storage(cpu_memory)
             
-            global_storage_id += 1
+            num_blocks = int(available_memory_per_stage // space_per_block)
+            assert num_blocks > 0
+            read_thput = 0
+            write_thput = 0
+            if len(replica_scheduler_config.cpu_memory_size) > 0:
+                read_thput = _parse_thput(replica_scheduler_config.cpu_gpu_thput)
+                write_thput = _parse_thput(replica_scheduler_config.gpu_cpu_thput)
+            
+            controller.append_layer(num_blocks, read_thput, write_thput, 
+                                    replica_scheduler_config.cache_evict_type, 
+                                    replica_scheduler_config.cache_evict_op,
+                                    replica_scheduler_config.read_buffer_fraction, 
+                                    space_per_token_per_layer)
+            if len(replica_scheduler_config.cpu_memory_size) > 0:
+                # FIXME: Now only CPU.
+                cpu_memory_size = _parse_memory_size(replica_scheduler_config.cpu_memory_size)
+                cpu_num_blocks = int(cpu_memory_size // space_per_block)
+                assert cpu_num_blocks > 0
+                controller.append_layer(cpu_num_blocks, 0, 0, replica_scheduler_config.cache_evict_type, "discard", 
+                                        replica_scheduler_config.cpu_sysbuf_fraction, space_per_token_per_layer)
         else:
             for _ in range(num_stages):
                 self._replica_kv_controllers.append(None)
         self._max_blocks_per_sequence = (
             self._request_generator_config.max_tokens // self._config.block_size
         )
-
-        memory_planner = MemoryPlanner(self._replica_config, replica)
+        
+        memory_planner = MemoryPlanner(self._replica_config, replica, read_buffer_fraction)
 
         if not self._config.num_blocks:
             self._config.num_blocks = (
@@ -218,4 +220,13 @@ class BaseReplicaScheduler(ABC):
                 break
             scheduled_batches.append(batch)
             self._num_running_batches += 1
+        for batch in scheduled_batches:
+            for req in batch.requests:
+                req.set_replica_scheduler(self)
         return scheduled_batches
+
+    def get_kv_controller(self, stage_id: int) -> KVStorageController:
+        return self._replica_kv_controllers[stage_id]
+
+    def get_all_kv_controllers(self) -> List[KVStorageController]:
+        return self._replica_kv_controllers

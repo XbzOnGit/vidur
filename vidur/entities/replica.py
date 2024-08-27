@@ -96,10 +96,11 @@ class Replica(BaseEntity):
     @property
     def memory_margin_fraction(self) -> float:
         return self._replica_config.memory_margin_fraction
-
+    
     @property
-    def inter_req_kvcache_fraction(self) -> float:
-        return self._replica_config.inter_req_kvcache_fraction
+    def gpu_cache_only_fraction(self) -> float:
+        return self._replica_config.gpu_cache_only_fraction
+
 
     @property
     def max_request_tokens(self) -> int:
