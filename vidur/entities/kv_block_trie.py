@@ -4,6 +4,7 @@ from vidur.entities.communications import Channel
 import atexit
 
 
+
 # The exposed APIs should return the timestamp that it is possible for the next operations.
 # Like a complete timestamp and a layer timestamp, and a per layer time interval.
 # Then controller can return organize the time to start execution and end execution based on this.
@@ -58,7 +59,7 @@ class KVBlockTrieNode:
         self.evict_list_prev = [None, None, None]
         self.evict_list_next = [None, None, None]
         self._children_color_cnt = [0, 0, 0]
-        
+
         self._tokens_parent_to_here = tokens_parent_to_here
         self._kvtrie = kvtrie
 
@@ -148,6 +149,34 @@ class KVBlockTrieNode:
                 self._kvtrie.push_to_evict_list_tail(last_layer_no, self)
                 # It can be both None, if it is the only one in the list.
                 # assert self.evict_list_next[last_layer_no] is not None or self.evict_list_prev[last_layer_no] is not None
+
+    # Trie insert.
+    # Trie delete.
+    # Color upgrade.
+    # Color degrade.
+
+    # Should update children color count && evict list(leaf condition).
+    '''
+    def leaf_update(self, op_type: int, layerno_before: int):
+        if op_type == 0:
+            assert layerno_before == 0
+            parent_node = self.parent
+            assert parent_node is not None
+            parent_node._children_color_cnt[0] += 1
+            if parent_node._children_color_cnt[0] == 1:
+                # Remove from evict list because it is not a leaf anymore.
+                # But should be leaf before.
+                assert parent_node.evict_list_next[0] is not None or parent_node.evict_list_prev[0] is not None
+                self._kvtrie.remove_from_evict_list(0, parent_node)
+        elif op_type == 1:
+            assert layerno_before == self._kvtrie.num_storage_layers - 1
+            parent_node = self.parent
+            assert parent_node is not None
+            parent_node._children_color_cnt[layerno_before] -= 1
+            assert parent_node._children_color_cnt[layerno_before] >= 0
+            if parent_node._children_color_cnt[layerno_before] == 0:
+                # Make parent a leaf.
+    '''
 
     @property
     def refcnt(self):
@@ -465,13 +494,35 @@ class KVBlockTrie:
             # Update evict list.
             # FIXME: Now only LRU.
             # NOTE: Only move if already inside.
-            self.move_to_evict_list_tail_in_all_layers(len(self._evict_candidates), next_node)
+
+            # NOTE: Update in reverse order.
+            # self.move_to_evict_list_tail_in_all_layers(len(self._evict_candidates), next_node)
             current_node = next_node
         # len(retval) - 1 should be the number of full blocks found.
+        reverse_idx = len(retval) - 1
+        while reverse_idx > 0:
+            node = retval[reverse_idx]
+            self.move_to_evict_list_front_in_all_layers(len(self._evict_candidates), node)
+            reverse_idx -= 1
         return retval
     
+    # If already inside, move it.
+    # If not, push it.
+    def evict_list_try_push_in_reverse_order(self, trace: List[KVBlockTrieNode], layer_no: int):
+        assert self.eviction_selection[layer_no] == self.evict_selection_lru
+        reverse_idx = len(trace) - 1
+        while reverse_idx > 0:
+            node = trace[reverse_idx]
+            if node == self.root:
+                assert reverse_idx == 0
+                break
+            if node.evict_list_next[layer_no] is not None or node.evict_list_prev[layer_no] is not None:
+                self.remove_from_evict_list(layer_no, node)
+            self.push_to_evict_list_tail(layer_no, node)
+            reverse_idx -= 1
 
 
+    # NOTE: Evict list outside this function.
     def insert_with_prepared_node_and_space(self, the_node: KVBlockTrieNode, layer_no: int, timestamp, layer_timestamp):
         # Mark space outside.
         # Even if already in, update list.
@@ -482,7 +533,7 @@ class KVBlockTrie:
             assert not the_node.check_if_color_present(layer_no)
             assert the_node.evict_list_prev[layer_no] is None
             assert the_node.evict_list_next[layer_no] is None
-            # FIXME: Now only LRU.
+            # NOTE: Now update outside.
             self.push_to_evict_list_tail(layer_no, the_node)
             self.move_to_evict_list_tail_in_all_layers(len(self._evict_candidates), the_node)
             self._used_blocks[layer_no] += 1 # Still should count, cos in another layer.

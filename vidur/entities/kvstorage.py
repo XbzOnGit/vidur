@@ -157,6 +157,9 @@ class KVStorageController(BaseEntity):
                 number_of_blocks_to_active_diff += current_active_block - self._active_blocks[request.id]
                 self._active_blocks[request.id] = current_active_block
             bidx += 1
+        # for hit_trace in hit_traces:
+        #    for lno in range(self._kv_block_trie.num_storage_layers):
+        #        self._kv_block_trie.evict_list_try_push_in_reverse_order(hit_trace, lno)
         number_of_blocks_to_preload = len(preload_trienode_set)
         number_of_blocks_to_synced_to_memory = len(synced_fetch_from_disk_to_memory)
         # print(f"Number of blocks to preload: {number_of_blocks_to_preload}, number of blocks to synced to memory: {number_of_blocks_to_synced_to_memory}")
@@ -324,8 +327,12 @@ class KVStorageController(BaseEntity):
             assert kvblock.is_full()
             kvblock_list.append(kvblock)
         hit_trace = self._kv_block_trie.lookup(kvblock_list)
-        for hit in hit_trace[1:]:
+        # Do not update evict list of this now.
+        reverse_idx = len(hit_trace) - 1
+        while reverse_idx > 0:
+            hit = hit_trace[reverse_idx]
             hit.remove_ref()
+            reverse_idx -= 1
         self.remove_request_from_active_blocks(request.id)
 
     @property
