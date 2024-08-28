@@ -94,6 +94,7 @@ class KVStorageController(BaseEntity):
                 assert kvblock.is_full()
                 kvblock_list.append(kvblock)
             # Lru list has been updated in lookup.
+            # Record hit.
             hit_trace = self._kv_block_trie.lookup(kvblock_list)
             hit_traces.append(hit_trace)
             # Should forever be enough space on GPU for replica scheduler to guarantee.
@@ -131,6 +132,12 @@ class KVStorageController(BaseEntity):
             current_full_blocks = curent_tokens_after_this // self._block_size
             previous_have_blocks = hit_length
             previous_full_blocks = request.num_processed_tokens // self._block_size
+            if previous_have_blocks > previous_full_blocks:
+                # The later ones are effective hit.
+                for i in range(previous_full_blocks, previous_have_blocks):
+                    index = i + 1
+                    hit_node = hit_trace[index]
+                    self._kv_block_trie.add_hit(hit_node.get_color()[0])
             last_virtual_full_block = hit_trace[len(hit_trace) - 1]
             if current_full_blocks > previous_have_blocks:
                 for i in range(previous_have_blocks, current_full_blocks):
@@ -167,6 +174,7 @@ class KVStorageController(BaseEntity):
             for node in synced_fetch_from_disk_to_memory:
                 assert node.get_color()[0] == 2
                 # LRU list has been updated on lookup.
+                self._kv_block_trie.add_insert(1)
                 node.fetch_to_higher_location(fetch_end_time, fetch_firlayer_time)
             # Now add the timepoint to fetch from memory to CPU.
             # NOTE: Change timestamp here, cos it is a synced time flow.
@@ -192,7 +200,7 @@ class KVStorageController(BaseEntity):
         # print(avb)
         # print(number_of_blocks_to_active_diff)
         # print(f"Used block: {self._kv_block_trie._used_blocks[0]}")
-        if self._kv_block_trie._num_blocks[0] - self._kv_block_trie._used_blocks[0] < number_of_blocks_to_active_diff:
+        if self._kv_block_trie.num_blocks[0] - self._kv_block_trie.used_blocks[0] < number_of_blocks_to_active_diff:
             # print("Called")
             msend, msfir, msper = self._kv_block_trie.synced_make_space(0, number_of_blocks_to_active_diff, timestamp, False, 
                                                                         False)
@@ -252,6 +260,7 @@ class KVStorageController(BaseEntity):
         ready_exec_per_layer = (end_firlayer_time, per_layer_preload_time) if self._layer_pipeline else (end_time ,0.0)
         for node in preload_trienode_set:
             assert node.get_color()[0] == 1
+            self._kv_block_trie.add_insert(0)
             node.fetch_to_higher_location(end_time, end_firlayer_time)
         # Have to wait for the whole batch to fetch, so set the batch fetch time on the node.
         # Now hack the batch and store the restore information.
@@ -339,7 +348,7 @@ class KVStorageController(BaseEntity):
             if tuple(the_node.tokens) not in parent.children:
                 new_list.append(new_block)
             else:
-                node = parent.children[tuple(the_node.tokens)]
+                node = parent.children[the_node.tokens]
                 checkitem = node.check_if_color_present(1)
                 if checkitem is None:
                     new_list.append(new_block)
@@ -397,4 +406,5 @@ class KVStorageController(BaseEntity):
             assert reqid in self._active_blocks
             assert the_node.get_color()[0] == 0 # Must be present in GPU.
             if not the_node.check_if_color_present(1):
+                self._kv_block_trie.add_insert(1)
                 the_node.push_to_lower_location(end_time, end_firlayer_time)

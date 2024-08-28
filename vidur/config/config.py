@@ -311,6 +311,14 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default="",
         metadata={"help": "CPU memory size."},
     )
+    disk_size: str = field(
+        default="",
+        metadata={"help": "Disk size."},
+    )
+    disk_prefetch: str = field(
+        default="",
+        metadata={"help": "Disk prefetch."},
+    )
     gpu_cpu_thput: str = field(
         default="",
         metadata={"help": "GPU CPU throughput."},
@@ -339,7 +347,14 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default=0.1,
         metadata={"help": "CPU sysbuf fraction."},
     )
-
+    cpu_disk_thput: str = field(
+        default="",
+        metadata={"help": "CPU disk throughput."},
+    )
+    disk_cpu_thput: str = field(
+        default="",
+        metadata={"help": "Disk CPU throughput."},
+    )
 
 
 

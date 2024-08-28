@@ -53,7 +53,6 @@ class BaseReplicaScheduler(ABC):
         self._num_stages = num_stages
         self._last_on_schedule_time = 0
 
-        # FIXME: Currently one storage(highest level) for one replica.
         # FIXME: Now just prefix cache and lru.
         available_memory = (
             replica.total_memory_gb
@@ -98,12 +97,26 @@ class BaseReplicaScheduler(ABC):
                                     replica_scheduler_config.read_buffer_fraction, 
                                     space_per_token_per_layer)
             if len(replica_scheduler_config.cpu_memory_size) > 0:
-                # FIXME: Now only CPU.
+                layer_of_storage = 2 if len(replica_scheduler_config.disk_size) == 0 else 3
                 cpu_memory_size = _parse_memory_size(replica_scheduler_config.cpu_memory_size)
                 cpu_num_blocks = int(cpu_memory_size // space_per_block)
                 assert cpu_num_blocks > 0
-                controller.append_layer(cpu_num_blocks, 0, 0, replica_scheduler_config.cache_evict_type, "discard", 
+                cpu_evict_op = "discard" if layer_of_storage == 2 else replica_scheduler_config.cache_evict_op
+                cpu_read_thput = 0
+                cpu_write_thput = 0
+                if layer_of_storage == 3:
+                    cpu_read_thput = _parse_thput(replica_scheduler_config.disk_cpu_thput)
+                    cpu_write_thput = _parse_thput(replica_scheduler_config.cpu_disk_thput)
+                controller.append_layer(cpu_num_blocks, cpu_read_thput, cpu_write_thput, replica_scheduler_config.cache_evict_type, cpu_evict_op, 
                                         replica_scheduler_config.cpu_sysbuf_fraction, space_per_token_per_layer)
+                if layer_of_storage == 3:
+                    disk_size = _parse_memory_size(replica_scheduler_config.disk_size)
+                    disk_num_blocks = int(disk_size // space_per_block)
+                    assert disk_num_blocks > 0
+                    controller.append_layer(disk_num_blocks, 0, 0, replica_scheduler_config.cache_evict_type, 
+                                            "discard", 0.0, space_per_token_per_layer)
+                    
+                
         else:
             for _ in range(num_stages):
                 self._replica_kv_controllers.append(None)

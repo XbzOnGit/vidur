@@ -1,8 +1,7 @@
 from typing import List, Tuple
 import heapq
 from vidur.entities.communications import Channel
-from collections import OrderedDict
-import enum
+import atexit
 
 
 # The exposed APIs should return the timestamp that it is possible for the next operations.
@@ -58,9 +57,11 @@ class KVBlockTrieNode:
         # FIXME: Currently at most 3 layers.
         self.evict_list_prev = [None, None, None]
         self.evict_list_next = [None, None, None]
+        self._children_color_cnt = [0, 0, 0]
+        
         self._tokens_parent_to_here = tokens_parent_to_here
         self._kvtrie = kvtrie
-        
+
     def mark_initial_location(self, initial_location_id: int, initial_timestamp, initial_layer_timestamp):
         assert len(self._colors) == 0
         self._colors.append((initial_location_id, initial_timestamp, initial_layer_timestamp))
@@ -68,15 +69,16 @@ class KVBlockTrieNode:
     def add_location(self, location: int, timestamp, layer_timestamp):
         heapq.heappush(self._colors, (location, timestamp, layer_timestamp))
     
-    def update_new_block(self, block: KVBlock, layer_no: int, timestamp, layer_timestamp):
-        assert tuple(block.tokens) not in self.children
-        newnode = KVBlockTrieNode(self, tuple(block.tokens), self._kvtrie)
-        newnode.mark_initial_location(layer_no, timestamp, layer_timestamp)
-        self.children[tuple(block.tokens)] = newnode
-        return newnode
+    
+    def add_child_node(self, child_node, layer_no, timestamp, layer_timestamp):
+        assert child_node.tokens not in self.children
+        assert len(child_node._colors) == 0
+        self.children[child_node.tokens] = child_node
+        child_node.mark_initial_location(layer_no, timestamp, layer_timestamp)
+        
         
     def already_has_block(self, block: KVBlock):
-        return tuple(block.tokens) in self.children
+        return block.tokens in self.children
     
     def fetch_to_higher_location(self, complete_timestamp, complete_layer_timestamp):
         assert len(self._colors) > 0
@@ -147,7 +149,6 @@ class KVBlockTrieNode:
                 # It can be both None, if it is the only one in the list.
                 # assert self.evict_list_next[last_layer_no] is not None or self.evict_list_prev[last_layer_no] is not None
 
-
     @property
     def refcnt(self):
         return self._refcnt
@@ -159,9 +160,6 @@ class KVBlockTrieNode:
 
     
 
-# Just attach the list next prev info into TrieNodes.
-# Implement LRU first.
-# Then can implement a MRU.
 # Random and FIFO not easy to implement now.
 
 # Model channels outside the trie, this is only information about it.
@@ -178,6 +176,10 @@ class KVBlockTrie:
         self._insert_op = [] # Used for write through.
         self._evict_op = [] # Discard, write back, write through.
         # If write through, no need to evict, so callback same as Discard.
+
+        self._insert_cnt = []
+        self._evict_cnt = []
+        self._hit_cnt = []
 
         # Runtime info.
         self._used_blocks = []
@@ -203,6 +205,40 @@ class KVBlockTrie:
         
 
         self._layer_pipeline = layer_pipeline
+
+        atexit.register(self.dump_stats)
+
+    def dump_stats(self):
+        for i in range(len(self._num_blocks)):
+            print(f"Layer {i}:")
+            print(f"Insert: {self._insert_cnt[i]}, Evict: {self._evict_cnt[i]}, Hit: {self._hit_cnt[i]}")
+
+    def _print_trie_node(self, node: KVBlockTrieNode):
+        print(f"Node: {node.id}")
+        print(f"Refcnt: {node.refcnt}")
+        print(f"Colors: {node._colors}")
+        if node.parent is not None:
+            print(f"parent: {node.parent.id}")
+            if node.parent.id != node.id - 1:
+                print(f"node {node.id} with parent {node.parent.id} NOT -1 form!!")
+        else:
+            print("parent: None")
+        print("--------------------------------------------")
+        for child in node.children.values():
+            self._print_trie_node(child)
+    def _print_trie(self):
+        self._print_trie_node(self.root)
+
+    def delete_node(self, node: KVBlockTrieNode):
+        assert node.get_color()[0] == self.num_storage_layers - 1
+        assert node.refcnt == 0
+        assert node.evict_list_prev[self.num_storage_layers - 1] is None
+        assert node.evict_list_next[self.num_storage_layers - 1] is None
+        if len(node.children) != 0:
+            print(f"{node.id} -len{len(node.children)}-> {next(iter(node.children.values())).id}")
+            # self._print_trie()
+        assert len(node.children) == 0, f"{node.id} -len{len(node.children)}-> {next(iter(node.children.values())).id}"
+        del node.parent.children[node.tokens]
     
     def _evict_blocks(self, layer_no, evict_number, timestamp, no_write: bool) -> Tuple[float, float, float]:
         assert evict_number >= 0
@@ -218,14 +254,15 @@ class KVBlockTrie:
         # Should have beend removed from list in evict_selection.
         total_layer_cnt = len(self._evict_candidates)
         write_to_next_layer = []
-        for i in range(evict_number):
+        for _ in range(evict_number):
+            self.add_evict(layer_no)
             evict_node: KVBlockTrieNode = evict_selection(layer_no)
             if layer_no == total_layer_cnt - 1:
                 # Must be discard.
                 assert evict_node.refcnt == 0
                 # Discard.
                 # Remove from evict list, it must be inside.
-                del evict_node.parent.children[tuple(evict_node._tokens_parent_to_here)]
+                self.delete_node(evict_node)
             else:
                 # Just to lower layer.
                 # Check if a write is needed.
@@ -276,6 +313,7 @@ class KVBlockTrie:
         # else no write && no eviction.
         # Mark the eviction in trie.
         for evict_node in write_to_next_layer:
+            self.add_insert(layer_no + 1)
             already_inside, wno = evict_node.evict_to_lower_location(write_end_time, write_first_layer_end_time)
             if evict_node.refcnt == 0:
                 self.push_to_evict_list_tail(wno, evict_node)
@@ -433,51 +471,30 @@ class KVBlockTrie:
         return retval
     
 
-    
-    def insert_full_block(self, last_node: KVBlockTrieNode, block: KVBlock, layer_no: int, timestamp, layer_timestamp):
-        # Mark space outside.
-        assert block.is_full()
-        # Even if already in, update list.
-        # FIXME: Now only LRU.
-        if last_node.already_has_block(block):
-            # No real insertion, but need to add color to that layer.
-            the_node: KVBlockTrieNode = last_node.children[tuple(block.tokens)]
-            assert not the_node.check_if_color_present(layer_no)
-            assert the_node.evict_list_prev[layer_no] is None
-            assert the_node.evict_list_next[layer_no] is None
-            self.push_to_evict_list_tail(layer_no, the_node)
-            self.move_to_evict_list_tail_in_all_layers(len(self._evict_candidates), the_node)
-            the_node.add_location(layer_no, timestamp, layer_timestamp)
-            return the_node
-        else:
-            # So the space should have been reserved before.
-            # Has marked location.
-            newnode = last_node.update_new_block(block, layer_no, timestamp, layer_timestamp)
-            assert newnode.evict_list_prev[layer_no] is None
-            assert newnode.evict_list_next[layer_no] is None
-            self.push_to_evict_list_tail(layer_no, newnode)
-            self.move_to_evict_list_tail_in_all_layers(len(self._evict_candidates), newnode)
-            self._used_blocks[layer_no] += 1
-            assert self._used_blocks[layer_no] <= self._num_blocks[layer_no]
-            return newnode
 
     def insert_with_prepared_node_and_space(self, the_node: KVBlockTrieNode, layer_no: int, timestamp, layer_timestamp):
         # Mark space outside.
         # Even if already in, update list.
-        last_node = the_node.parent
+        self.add_insert(layer_no)
+        last_node: KVBlockTrieNode = the_node.parent
         if the_node.tokens in last_node.children:
             the_node = last_node.children[the_node.tokens]
             assert not the_node.check_if_color_present(layer_no)
             assert the_node.evict_list_prev[layer_no] is None
             assert the_node.evict_list_next[layer_no] is None
+            # FIXME: Now only LRU.
             self.push_to_evict_list_tail(layer_no, the_node)
             self.move_to_evict_list_tail_in_all_layers(len(self._evict_candidates), the_node)
+            self._used_blocks[layer_no] += 1 # Still should count, cos in another layer.
+            assert self._used_blocks[layer_no] <= self._num_blocks[layer_no]
             the_node.add_location(layer_no, timestamp, layer_timestamp)
             return the_node # Return the one inserted before.
         else:
             assert len(the_node._colors) == 0
-            the_node.mark_initial_location(layer_no, timestamp, layer_timestamp)
-            last_node.children[the_node.tokens] = the_node
+            #the_node.mark_initial_location(layer_no, timestamp, layer_timestamp)
+            # Insert into trie.
+            #last_node.children[the_node.tokens] = the_node
+            last_node.add_child_node(the_node, layer_no, timestamp, layer_timestamp)
             assert the_node.evict_list_prev[layer_no] is None
             assert the_node.evict_list_next[layer_no] is None
             self.push_to_evict_list_tail(layer_no, the_node)
@@ -492,13 +509,21 @@ class KVBlockTrie:
         # Node is representing the edge.
         assert len(self._evict_candidates) > layer_no
         head, tail = self._evict_candidates[layer_no]
+        # print(f"Selecting eviction on layer {layer_no}")
+        # current = head
+        # while current is not None:
+        #     print(f"{current.id}, {current.record_of_evictlist_ops}")
+        #     current = current.evict_list_next[layer_no]
+
         assert head is not None, f"{self._evict_candidates[layer_no]}, {layer_no}"
         assert tail is not None, f"{self._evict_candidates[layer_no]}, {layer_no}"
         assert head.evict_list_prev[layer_no] is None, f"{self._evict_candidates[layer_no]}, {layer_no}"
         assert tail.evict_list_next[layer_no] is None, f"{self._evict_candidates[layer_no]}, {layer_no}"
         self.remove_from_evict_list(layer_no, head)
+        # if head.id == 1:
+        #     print(f"LRU selected {head.id}, {head.record_of_evictlist_ops}")
         return head
-    
+    '''
     def evict_selection_mru(self, layer_no: int):
         assert len(self._evict_candidates) > layer_no
         head, tail = self._evict_candidates[layer_no]
@@ -508,7 +533,14 @@ class KVBlockTrie:
         assert tail.evict_list_next[layer_no] is None
         self.remove_from_evict_list(layer_no, tail)
         return tail
-        
+    '''
+    
+    def add_insert(self, layer_no: int):
+        self._insert_cnt[layer_no] += 1
+    def add_evict(self, layer_no: int):
+        self._evict_cnt[layer_no] += 1
+    def add_hit(self, layer_no: int):
+        self._hit_cnt[layer_no] += 1
 
     def append_layer(self, num_blocks, read_thput, 
                      write_thput, evict_policy: str, evict_op: str, shadow_buffer_fraction: float, space_per_token_per_layer):
@@ -524,11 +556,14 @@ class KVBlockTrie:
         if evict_policy.upper() == "LRU":
             self.eviction_selection.append(self.evict_selection_lru)
         elif evict_policy.upper() == "MRU":
-            self.eviction_selection.append(self.evict_selection_mru)
+            raise NotImplementedError("MRU not implemented.")
         else:
             raise ValueError(f"Unknown eviction policy: {evict_policy}")
         self._evict_candidates.append((None, None))
         self._evict_op.append(evict_op)
+        self._insert_cnt.append(0)
+        self._evict_cnt.append(0)
+        self._hit_cnt.append(0)
 
     
     def get_channel(self, layer_no) -> Tuple[Channel, Channel]:
@@ -537,3 +572,9 @@ class KVBlockTrie:
     @property
     def num_storage_layers(self):
         return len(self._num_blocks)
+    @property
+    def num_blocks(self):
+        return self._num_blocks
+    @property
+    def used_blocks(self):
+        return self._used_blocks
