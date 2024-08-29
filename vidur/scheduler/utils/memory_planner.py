@@ -4,10 +4,10 @@ from vidur.utils.param_counter import ParamCounter
 
 
 class MemoryPlanner:
-    def __init__(self, replica_config: ReplicaConfig, replica: Replica, load_buffer_fraction: float) -> None:
+    def __init__(self, replica_config: ReplicaConfig, replica: Replica, space_for_buffer: int) -> None:
         self._param_counter = ParamCounter(replica_config)
         self._replica = replica
-        self._load_buffer_fraction = load_buffer_fraction
+        self._space_for_buffer = space_for_buffer
 
     def _get_kv_cache_memory_per_layer_per_request(self) -> int:
         return (
@@ -26,13 +26,15 @@ class MemoryPlanner:
             self._get_kv_cache_memory_per_layer_per_request() * self._replica.num_layers
         )
 
+    def get_param_memory_per_device(self) -> int:
+        return self._get_parameter_memory_per_device()
+
     def get_max_batch_size(self) -> int:
         # Should remove those left for inter request kv cache.
         available_memory = (
             self._replica.total_memory_gb
             * 1024**3
-            * (1 - self._replica.memory_margin_fraction) * (1 - self._replica.gpu_cache_only_fraction) * 
-            (1 - self._load_buffer_fraction)
+            * (1 - self._replica.memory_margin_fraction) - self._space_for_buffer
         )
         parameter_memory_per_device = self._get_parameter_memory_per_device()
         kv_cache_memory_per_device_per_request = (

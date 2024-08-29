@@ -1,6 +1,7 @@
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 from vidur.entities.base_entity import BaseEntity
+from vidur.entities.kv_block_trie import KVBlock, get_general_kv_block_size
 from vidur.logger import init_logger
 
 logger = init_logger(__name__)
@@ -32,7 +33,7 @@ class Request(BaseEntity):
         num_prefill_tokens: int,
         num_decode_tokens: int,
         num_processed_tokens: int = 0,
-        tokens: List[str] = None,
+        tokens: Optional[List[str]] = None,
     ):
         self._id = Request.generate_id()
         self._arrived_at = arrived_at
@@ -64,10 +65,27 @@ class Request(BaseEntity):
         self._kv_fetch_time = 0.0
         self._kv_insert_time = 0.0
         self._kv_inserted = False
+        self._full_kvblocks = None
 
     @property
     def size(self) -> Tuple[int, int]:
         return (self._num_prefill_tokens, self._num_decode_tokens)
+    
+    @property
+    def full_kvblocks(self) -> List[KVBlock]:
+        if self._full_kvblocks is None:
+            self._full_kvblocks = []
+            total_tokens = self._num_prefill_tokens + self._num_decode_tokens
+            block_size = get_general_kv_block_size()
+            assert block_size > 0
+            full_kv_block_cnt = total_tokens // block_size
+            for i in range(full_kv_block_cnt):
+                start_idx = i * block_size
+                end_idx = (i + 1) * block_size
+                kvblock = KVBlock(block_size)
+                kvblock.set_tokens(self.tokens[start_idx:end_idx])
+                self._full_kvblocks.append(kvblock)
+        return self._full_kvblocks
 
     @property
     @check_scheduled

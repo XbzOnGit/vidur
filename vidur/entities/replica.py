@@ -97,9 +97,6 @@ class Replica(BaseEntity):
     def memory_margin_fraction(self) -> float:
         return self._replica_config.memory_margin_fraction
     
-    @property
-    def gpu_cache_only_fraction(self) -> float:
-        return self._replica_config.gpu_cache_only_fraction
 
 
     @property

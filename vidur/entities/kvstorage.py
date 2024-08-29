@@ -49,8 +49,8 @@ class KVStorageController(BaseEntity):
     # This should be done in scheduler, then after this, acquire in KVBlockTrie to avoid forced eviction that will 
     # be synced delay.
     def append_layer(self, num_blocks: int, read_thput, write_thput, 
-                     evict_policy: str, evict_op: str, shadow_buffer_fraction: float, space_per_token_per_layer: int):
-        self._kv_block_trie.append_layer(num_blocks, read_thput, write_thput, evict_policy, evict_op, shadow_buffer_fraction, 
+                     evict_policy: str, evict_op: str, threshould_blocks: int, space_per_token_per_layer: int):
+        self._kv_block_trie.append_layer(num_blocks, read_thput, write_thput, evict_policy, evict_op, threshould_blocks, 
                                          space_per_token_per_layer)
         self._storage_layer_cnt += 1
     
@@ -77,25 +77,17 @@ class KVStorageController(BaseEntity):
         number_of_blocks_to_active_diff = 0
 
         new_full_blocks_list: List[Tuple[int, KVBlockTrieNode]] = []
-
+        end_first_layer_of_already_in_gpu = None
         bidx = 0
         for request in batch_to_hack.requests:
             if request.num_processed_tokens % self._block_size != 0:
                 assert request.id in self._active_blocks
-            # Number of tokens to lookup should be 
             number_of_tokens_to_lookup = max(request.num_processed_tokens, request.num_prefill_tokens)
             number_of_blocks_to_lookup = number_of_tokens_to_lookup // self._block_size
-            kvblock_list = []
-            for i in range(number_of_blocks_to_lookup):
-                kvblock = KVBlock(block_size=self._block_size)
-                start_idx = i * self._block_size
-                end_idx = (i + 1) * self._block_size
-                kvblock.set_tokens(request.tokens[start_idx:end_idx])
-                assert kvblock.is_full()
-                kvblock_list.append(kvblock)
+            kvblock_list = request.full_kvblocks[:number_of_blocks_to_lookup]
             # Lru list has been updated in lookup.
             # Record hit.
-            hit_trace = self._kv_block_trie.lookup(kvblock_list)
+            hit_trace: List[KVBlockTrieNode] = self._kv_block_trie.lookup(kvblock_list, timestamp)
             hit_traces.append(hit_trace)
             # Should forever be enough space on GPU for replica scheduler to guarantee.
             new_req = request.id not in self._active_blocks
@@ -105,20 +97,21 @@ class KVStorageController(BaseEntity):
                     # Do not discard it.
                     # The only call to add_ref.
                     hit.add_ref()
-                color_info = hit.get_color()
-                if color_info[0] > 1:
+                color = hit.color
+                if color > 1:
                     # Do not need to preload from disk.
                     # But still add_ref.
-                    assert color_info[0] == 2
+                    assert color == 2
                     synced_fetch_from_disk_to_memory.add(hit)
                     preload_trienode_set.add(hit) # Fetch then preload.
-                elif color_info[0] == 1:
+                elif color == 1:
                     # Add preload.
                     preload_trienode_set.add(hit)
                 else:
-                    assert color_info[0] == 0
-                    complete_time = color_info[1]
-                    assert complete_time <= timestamp
+                    assert color == 0
+                    complete_time, complete_firlay_time = hit.get_ready_time(0)
+                    if end_first_layer_of_already_in_gpu is None or complete_firlay_time > end_first_layer_of_already_in_gpu:
+                        end_first_layer_of_already_in_gpu = complete_firlay_time
                     # This is because the preload of this batch should be together
                     # And preload of last batch should be done before this batch cos it is before execution of last batch.
             hit_length = len(hit_trace) - 1
@@ -137,14 +130,16 @@ class KVStorageController(BaseEntity):
                 for i in range(previous_full_blocks, previous_have_blocks):
                     index = i + 1
                     hit_node = hit_trace[index]
-                    self._kv_block_trie.add_hit(hit_node.get_color()[0])
-            last_virtual_full_block = hit_trace[len(hit_trace) - 1]
+                    self._kv_block_trie.add_hit(hit_node.color)
+            last_virtual_full_block: KVBlockTrieNode = hit_trace[len(hit_trace) - 1]
+            last_depth = last_virtual_full_block.depth
             if current_full_blocks > previous_have_blocks:
                 for i in range(previous_have_blocks, current_full_blocks):
+                    last_depth += 1
                     assert (i + 1) * self._block_size <= len(request.tokens), f"{((i + 1) * self._block_size)} > {len(request.tokens)}"
                     current_virtual_full_block = KVBlockTrieNode(last_virtual_full_block, 
                                                                  tuple(request.tokens[i * self._block_size: (i + 1) * self._block_size]),
-                                                                 self._kv_block_trie)
+                                                                 self._kv_block_trie, last_depth)
                     new_full_blocks_list.append((request.id, current_virtual_full_block))
                     last_virtual_full_block = current_virtual_full_block
             # print(f"Request {request.id} has {current_active_block} active blocks after counting current.")
@@ -157,6 +152,10 @@ class KVStorageController(BaseEntity):
                 number_of_blocks_to_active_diff += current_active_block - self._active_blocks[request.id]
                 self._active_blocks[request.id] = current_active_block
             bidx += 1
+
+        # Lookup and timestamp update in trie && active blocks record in controller.
+        # Also add reference counter.
+
         # for hit_trace in hit_traces:
         #    for lno in range(self._kv_block_trie.num_storage_layers):
         #        self._kv_block_trie.evict_list_try_push_in_reverse_order(hit_trace, lno)
@@ -167,15 +166,16 @@ class KVStorageController(BaseEntity):
             # Now fetch from disk to memory.
             # We know that it must be NOT in memory, so make space.
             # Loading into memory.
-            evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_make_space(1, 
-                                                                                                         number_of_blocks_to_synced_to_memory,
-                                                                                                         timestamp, 
-                                                                                                         False, True)
+            # print("1")
+            evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(1, 
+                                                                                                            number_of_blocks_to_synced_to_memory, 
+                                                                                                            timestamp, 
+                                                                                                            False, True)
             disk_read_channel = self._kv_block_trie.get_channel(1)[0]
             fetch_end_time, fetch_firlayer_time, per_layer_fetch_time = disk_read_channel.transmit(number_of_blocks_to_synced_to_memory *
                                                                                                    self._block_size, evict_end_time, self._num_layers)
             for node in synced_fetch_from_disk_to_memory:
-                assert node.get_color()[0] == 2
+                assert node.color == 2
                 # LRU list has been updated on lookup.
                 self._kv_block_trie.add_insert(1)
                 node.fetch_to_higher_location(fetch_end_time, fetch_firlayer_time)
@@ -193,6 +193,7 @@ class KVStorageController(BaseEntity):
         
         
         assert number_of_blocks_to_active_diff >= 0
+        # print(f"Number of blocks to active diff: {number_of_blocks_to_active_diff}\n\n")
         # Space for active blocks have been made above.
         # Active blocks marked in controller.
         # Now mark in KVBlockTrie.
@@ -203,13 +204,25 @@ class KVStorageController(BaseEntity):
         # print(avb)
         # print(number_of_blocks_to_active_diff)
         # print(f"Used block: {self._kv_block_trie._used_blocks[0]}")
-        if self._kv_block_trie.num_blocks[0] - self._kv_block_trie.used_blocks[0] < number_of_blocks_to_active_diff:
+        if self._kv_block_trie.available_blocks(0) < number_of_blocks_to_active_diff:
             # print("Called")
-            msend, msfir, msper = self._kv_block_trie.synced_make_space(0, number_of_blocks_to_active_diff, timestamp, False, 
+            # Wait for it.
+            # Recording of active blocks in controller have been updated.
+            # print("2")
+            original_blocks = self._kv_block_trie.available_blocks(0)
+            msend, msfir, msper = self._kv_block_trie.synced_acquire_space(0, number_of_blocks_to_active_diff, timestamp, False, 
                                                                         False)
+            # print(f"{original_blocks} -> {self._kv_block_trie.available_blocks(0)}")
             timestamp = msend
+        else:
+            # print("3")
+            msend, mkfir, msper = self._kv_block_trie.synced_acquire_space(0, number_of_blocks_to_active_diff, timestamp, True, False)
+            assert msper == 0.0
+            assert msend == mkfir
+            assert msend == timestamp
+        
         # print("\n\n")
-        self._kv_block_trie.acquire_active_block_for_highest_level(number_of_blocks_to_active_diff)
+        # Space and time for active blocks.
 
         time_to_start_fetch = None
         read_channel = self._kv_block_trie.get_channel(0)[0]
@@ -223,23 +236,30 @@ class KVStorageController(BaseEntity):
                 # Cos always written before.
                 # We know it must be NOT in GPU memory, so make space.
                 # no write because should always be present in 1.
-                self._kv_block_trie.synced_make_space(0, number_of_blocks_to_preload, 
+                # print("4")
+                self._kv_block_trie.synced_acquire_space(0, number_of_blocks_to_preload, 
                                                       timestamp, True, True)
                 # This is loading into 0, so use that buffer.
                 # Should be the time max(read_channel.last_time_in_use, request scheduled time, space contention time)
+                # FIXME: Modify scheduler to mark a scheduled time in advance in job queues.
+                # FIXME: It is better to launch preload there.
+                # FIXME: If preload is launched there, time_to_start_fetch is not important and should be skipped.
+                # FIXME: Use another timestamp, attached in scheduler.
                 time_to_start_fetch = max(read_channel.last_time_in_use, batch_to_hack.scheduled_at)
                 # Note that need enough space at time_to_start_fetch.
             else:
                 # Evict first, wait for the first layer to complete.
                 # Then fetch at that time.
                 # After execution point, now.
-                evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_make_space(0, 
+                # print("5")
+                evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(0, 
                                                                                             number_of_blocks_to_preload,
                                                                                             timestamp, False, True)
                 # FIXME: Now make this case simpler, just wait until end.
                 time_to_start_fetch = evict_end_time
         else:
-            evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_make_space(0,
+            # print("6")
+            evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(0,
                                                                                             number_of_blocks_to_preload,
                                                                                             timestamp, False, True)
             # Wait for evict to complete when no pipeline.
@@ -262,7 +282,7 @@ class KVStorageController(BaseEntity):
         # So when pipeline with read_preload_buffer met with eviction write back, always wait for eviction to complete for now.
         ready_exec_per_layer = (end_firlayer_time, per_layer_preload_time) if self._layer_pipeline else (end_time ,0.0)
         for node in preload_trienode_set:
-            assert node.get_color()[0] == 1
+            assert node.color == 1
             self._kv_block_trie.add_insert(0)
             node.fetch_to_higher_location(end_time, end_firlayer_time)
         # Have to wait for the whole batch to fetch, so set the batch fetch time on the node.
@@ -279,7 +299,7 @@ class KVStorageController(BaseEntity):
             batch_num_tokens_list.append(batch_to_hack.num_tokens[req_bidx])
             if not request.is_prefill_complete:
                 hit_trace = hit_traces[req_bidx]
-                assert all(hit.get_color()[0] == 0 for hit in hit_trace[1:])
+                assert all(hit.color == 0 for hit in hit_trace[1:])
                 hit_block_cnt = len(hit_trace) - 1
                 hit_token_length = hit_block_cnt * self._block_size
                 if hit_token_length > request.num_processed_tokens:
@@ -318,21 +338,11 @@ class KVStorageController(BaseEntity):
         if request.num_processed_tokens % self._block_size != 0:
             assert request.id in self._active_blocks
         num_processed_blocks = request.num_processed_tokens // self._block_size
-        kvblock_list = []
-        for i in range(num_processed_blocks):
-            kvblock = KVBlock(block_size=self._block_size)
-            start_idx = i * self._block_size
-            end_idx = (i + 1) * self._block_size
-            kvblock.set_tokens(request.tokens[start_idx:end_idx])
-            assert kvblock.is_full()
-            kvblock_list.append(kvblock)
-        hit_trace = self._kv_block_trie.lookup(kvblock_list)
-        # Do not update evict list of this now.
-        reverse_idx = len(hit_trace) - 1
-        while reverse_idx > 0:
-            hit = hit_trace[reverse_idx]
+        kvblock_list = request.full_kvblocks[:num_processed_blocks]
+        # Should not update timestamp.
+        hit_trace: List[KVBlockTrieNode] = self._kv_block_trie.lookup(kvblock_list, -1.0)
+        for hit in hit_trace[1:]:
             hit.remove_ref()
-            reverse_idx -= 1
         self.remove_request_from_active_blocks(request.id)
 
     @property
@@ -352,17 +362,17 @@ class KVStorageController(BaseEntity):
             parent = the_node.parent
             assert reqid in self._active_blocks
             assert len(the_node.tokens) == self._block_size, f"{len(the_node.tokens)} != {self._block_size}"
-            if tuple(the_node.tokens) not in parent.children:
+            if the_node.tokens not in parent.children:
                 new_list.append(new_block)
             else:
-                node = parent.children[the_node.tokens]
-                checkitem = node.check_if_color_present(1)
-                if checkitem is None:
+                node: KVBlockTrieNode = parent.children[the_node.tokens]
+                if not node.check_if_color_present(1):
                     new_list.append(new_block)
 
         needed_block_number = len(new_list)
         # This is writing to layer 1, so do not use the buffer.
-        end_time, end_fir_time, per_layer_time = self._kv_block_trie.synced_make_space(1, 
+        # print("7")
+        end_time, end_fir_time, per_layer_time = self._kv_block_trie.synced_acquire_space(1, 
                                                 needed_block_number, timestamp, False, False)
         # That buffer is used for fetch, so false for use_shadow_buf flag.
         write_channel = self._kv_block_trie.get_channel(0)[1]
@@ -371,13 +381,17 @@ class KVStorageController(BaseEntity):
         return end_write, end_firlay_write, per_layer_write_time
 
     
-    
-    def _insert_with_prepared_node_and_space_into_layer0(self, the_node: KVBlockTrieNode, end_time, end_firlayer_time, refcnt_inc: bool):
+    # Space has even been acquired before.
+    def _insert_with_prepared_node_into_layer0(self, the_node: KVBlockTrieNode, end_time, end_firlayer_time, refcnt_inc: bool):
         parent_node = the_node.parent
-        if the_node.tokens in parent_node.children and parent_node.children[the_node.tokens].check_if_color_present(0):
+        if the_node.tokens in parent_node.children:
+            # Always fetch all the blocks, so if present, must be in GPU.
+            # No need to update timestamp, already counted on hit.
+            assert parent_node.children[the_node.tokens].check_if_color_present(0)
             the_node = parent_node.children[the_node.tokens]
         else:
-            the_node = self._kv_block_trie.insert_with_prepared_node_and_space(the_node, 0, end_time, end_firlayer_time)
+            # A new block.
+            the_node = self._kv_block_trie.insert_with_prepared_new_node(the_node, 0, end_time, end_firlayer_time)
         if refcnt_inc:
             the_node.add_ref()
         return the_node
@@ -388,19 +402,31 @@ class KVStorageController(BaseEntity):
     def switch_active_fullblocks_into_cache(self, new_full_blocks_list: List[Tuple[int, KVBlockTrieNode]],
                                             end_time, end_firlayer_time):
         # print("Switching into cache.")
+        # Timepoints are end of execution.
         release_cnt = 0
         for reqid, the_node in new_full_blocks_list:
             assert reqid in self._active_blocks
             assert self._active_blocks[reqid] > 0, f"{self._active_blocks[reqid]}, reqid: {reqid}"
             self._active_blocks[reqid] -= 1
             release_cnt += 1
-                
+        blocks_before_release = self._kv_block_trie.available_blocks(0)
         self._kv_block_trie.release_active_block_for_highest_level(release_cnt)
+        real_insert = 0
+        original_blocks = self._kv_block_trie.available_blocks(0)
+        assert original_blocks >= release_cnt
+        # Space should be enough.
         # Must insert in order.
         replace_list = []
         for reqid, the_node in new_full_blocks_list:
-            new_node = self._insert_with_prepared_node_and_space_into_layer0(the_node, end_time, end_firlayer_time, True)
+            # Timestamp updated inside.
+            # Space also acquired inside.
+            new_node = self._insert_with_prepared_node_into_layer0(the_node, end_time, end_firlayer_time, True)
+            if new_node == the_node:
+                real_insert += 1
             replace_list.append((reqid, new_node))
+        # print(f"Switch into cache: {real_insert} out of {len(new_full_blocks_list)}.")
+        now_blocks = self._kv_block_trie.available_blocks(0)
+        # print(f"Blocks: {blocks_before_release} -> {original_blocks} -> {now_blocks}\n")
         idx = 0
         for tp in replace_list:
             new_full_blocks_list[idx] = tp
@@ -411,7 +437,7 @@ class KVStorageController(BaseEntity):
                                                     end_time, end_firlayer_time):
         for reqid, the_node in new_full_blocks_list:
             assert reqid in self._active_blocks
-            assert the_node.get_color()[0] == 0 # Must be present in GPU.
+            assert the_node.color == 0 # Must be present in GPU.
             if not the_node.check_if_color_present(1):
                 self._kv_block_trie.add_insert(1)
                 the_node.push_to_lower_location(end_time, end_firlayer_time)

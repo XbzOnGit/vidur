@@ -85,6 +85,7 @@ class ReplicaStageScheduler:
                     assert end_aw == end_faw, f"{end_aw} != {end_faw}"
                     async_write_list.append(end_aw)
                 end_last_exec_time = end_this_exec_time
+                # Assume that preload is continuous.
                 end_last_preload_time += load_per_layer_time
             end_execution_time = end_last_exec_time
             if len(new_full_blocks_list) > 0:

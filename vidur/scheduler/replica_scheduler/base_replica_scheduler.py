@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from typing import List
-
 from vidur.config import (
     BaseReplicaSchedulerConfig,
     BaseRequestGeneratorConfig,
@@ -59,47 +58,67 @@ class BaseReplicaScheduler(ABC):
             * 1024**3
             * (1 - replica.memory_margin_fraction)
         )
-        available_memory_per_stage = available_memory // num_stages
+        available_memory_per_stage = int(available_memory // num_stages)
         # FIXME: assuming fp16.
         # The second 2 for Key and Value.
         print(f"cache_lookup_type: {replica_scheduler_config.cache_lookup_type}")
         print(f"cache_evict_type: {replica_scheduler_config.cache_evict_type}")
         print(f"cache_evict_op: {replica_scheduler_config.cache_evict_op}")
         print(f"space per token on one stage: {(2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages}")
+        space_per_token = (2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages
+        space_per_token_per_layer = space_per_token // replica.num_layers
+        space_per_block = replica_scheduler_config.block_size * space_per_token
+
+        read_pipeline_buffer = False
+        if replica_scheduler_config.cache_lookup_type is not None:
+            read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
+        read_buffer_fraction = replica_scheduler_config.read_buffer_fraction
+        if not read_pipeline_buffer:
+            read_buffer_fraction = 0.0
+        gpu_read_buffer_space = int(available_memory_per_stage * read_buffer_fraction)
+        # Align to block.
+        gpu_read_buffer_blocks = gpu_read_buffer_space // space_per_block
+        gpu_read_buffer_space = gpu_read_buffer_blocks * space_per_block
+        memory_planner = MemoryPlanner(self._replica_config, replica, gpu_read_buffer_space) # Should not see that part.
+        param_size_per_device = memory_planner.get_param_memory_per_device()
         self._replica_kv_controllers = []
-        read_buffer_fraction = 0.0
         if replica_scheduler_config.cache_lookup_type is not None:
             layer_pipeline = True if replica_scheduler_config.layer_pipeline.upper() == "TRUE" else False
             gpu_write_through_cpu = True if replica_scheduler_config.gpu_write_through_cpu.upper() == "TRUE" else False
-            read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
-            read_buffer_fraction = replica_scheduler_config.read_buffer_fraction
-            cpu_sysbuf_fraction = replica_scheduler_config.cpu_sysbuf_fraction
+            # read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
             controller = KVStorageController(replica_scheduler_config.block_size, layer_pipeline, replica.num_layers // num_stages,
                                              read_pipeline_buffer, gpu_write_through_cpu)
             self._replica_kv_controllers.append(controller)
             # Space per token for each stage(each node).
-            space_per_token = (2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages
-            space_per_token_per_layer = space_per_token // replica.num_layers
-            space_per_block = replica_scheduler_config.block_size * space_per_token
             # Here no per TP, cos considered together.
-            
-            num_blocks = int(available_memory_per_stage // space_per_block)
+            available_kv_memory_gpu_per_stage = available_memory_per_stage - param_size_per_device
+            num_blocks = int(available_kv_memory_gpu_per_stage // space_per_block)
+            request_len = 3000
+            per_request_kv_size = space_per_token * request_len
+            print(f"About {available_kv_memory_gpu_per_stage / per_request_kv_size} requests can be stored in one stage.\n\n")
             assert num_blocks > 0
             read_thput = 0
             write_thput = 0
             if len(replica_scheduler_config.cpu_memory_size) > 0:
                 read_thput = _parse_thput(replica_scheduler_config.cpu_gpu_thput)
                 write_thput = _parse_thput(replica_scheduler_config.gpu_cpu_thput)
-            
+            gpu_threshold_block = num_blocks - gpu_read_buffer_blocks
+            assert gpu_threshold_block > 0
             controller.append_layer(num_blocks, read_thput, write_thput, 
                                     replica_scheduler_config.cache_evict_type, 
                                     replica_scheduler_config.cache_evict_op,
-                                    replica_scheduler_config.read_buffer_fraction, 
+                                    gpu_threshold_block, 
                                     space_per_token_per_layer)
             if len(replica_scheduler_config.cpu_memory_size) > 0:
                 layer_of_storage = 2 if len(replica_scheduler_config.disk_size) == 0 else 3
                 cpu_memory_size = _parse_memory_size(replica_scheduler_config.cpu_memory_size)
                 cpu_num_blocks = int(cpu_memory_size // space_per_block)
+                cpu_sysbuf_fraction = replica_scheduler_config.cpu_sysbuf_fraction
+                cpu_sysbuf_space = int(cpu_memory_size * cpu_sysbuf_fraction)
+                cpu_sysbuf_blocks = cpu_sysbuf_space // space_per_block
+                cpu_sysbuf_space = cpu_sysbuf_blocks * space_per_block
+                cpu_threshold_blocks = cpu_num_blocks - cpu_sysbuf_blocks
+                assert cpu_threshold_blocks > 0
                 assert cpu_num_blocks > 0
                 cpu_evict_op = "discard" if layer_of_storage == 2 else replica_scheduler_config.cache_evict_op
                 cpu_read_thput = 0
@@ -108,13 +127,13 @@ class BaseReplicaScheduler(ABC):
                     cpu_read_thput = _parse_thput(replica_scheduler_config.disk_cpu_thput)
                     cpu_write_thput = _parse_thput(replica_scheduler_config.cpu_disk_thput)
                 controller.append_layer(cpu_num_blocks, cpu_read_thput, cpu_write_thput, replica_scheduler_config.cache_evict_type, cpu_evict_op, 
-                                        replica_scheduler_config.cpu_sysbuf_fraction, space_per_token_per_layer)
+                                        cpu_threshold_blocks, space_per_token_per_layer)
                 if layer_of_storage == 3:
                     disk_size = _parse_memory_size(replica_scheduler_config.disk_size)
                     disk_num_blocks = int(disk_size // space_per_block)
                     assert disk_num_blocks > 0
                     controller.append_layer(disk_num_blocks, 0, 0, replica_scheduler_config.cache_evict_type, 
-                                            "discard", 0.0, space_per_token_per_layer)
+                                            "discard", 0, space_per_token_per_layer)
                     
                 
         else:
@@ -124,7 +143,7 @@ class BaseReplicaScheduler(ABC):
             self._request_generator_config.max_tokens // self._config.block_size
         )
         
-        memory_planner = MemoryPlanner(self._replica_config, replica, read_buffer_fraction)
+        
 
         if not self._config.num_blocks:
             self._config.num_blocks = (

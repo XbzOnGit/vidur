@@ -427,7 +427,7 @@ class MetricsConfig:
     """Metric configuration."""
 
     write_metrics: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Whether to write metrics."},
     )
     write_json_trace: bool = field(
@@ -531,12 +531,6 @@ class ReplicaConfig:
     memory_margin_fraction: float = field(
         default=0.1,
         metadata={"help": "Memory margin fraction."},
-    )
-    # This fraction will be reserved for inter request cache.
-    # Will not be used for compuation batch size decision.
-    gpu_cache_only_fraction: float = field(
-        default=0.0,
-        metadata={"help": "GPU cache only fraction."},
     )
     num_pipeline_stages: int = field(
         default=4,
