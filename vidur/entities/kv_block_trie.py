@@ -662,7 +662,8 @@ class KVBlockTrie:
             should_make_space = block_number - availble_blocks_without_buffer
             synced_evict_make_space = should_make_space
             if use_buf:
-                assert no_write # A seperate call to make use of read buffer.
+                assert no_write, f"{layer_no} {block_number} {timestamp} {no_write} {use_buf}"
+                # A seperate call to make use of read buffer.
                 # This buffer is used for loading into layer_no.
                 read_buffer_blocks = self.read_buffer_blocks(layer_no)
                 assert read_buffer_blocks >= 0

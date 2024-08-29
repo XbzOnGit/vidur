@@ -92,13 +92,8 @@ class KVStorageController(BaseEntity):
             hit_trace: List[KVBlockTrieNode] = self._kv_block_trie.lookup(kvblock_list, timestamp)
             hit_traces.append(hit_trace)
             # Should forever be enough space on GPU for replica scheduler to guarantee.
-            new_req = request.id not in self._active_blocks
             for hit in hit_trace[1:]:
                 # Just preload first.
-                if new_req:
-                    # Do not discard it.
-                    # The only call to add_ref.
-                    hit.add_ref()
                 color = hit.color
                 if color > 1:
                     # Do not need to preload from disk.
@@ -134,20 +129,24 @@ class KVStorageController(BaseEntity):
             previous_have_blocks = hit_length
             previous_full_blocks = request.num_processed_tokens // self._block_size
             if previous_have_blocks > previous_full_blocks:
+                # Effective hit.
                 # The later ones are effective hit.
                 for i in range(previous_full_blocks, previous_have_blocks):
                     index = i + 1
                     hit_node = hit_trace[index]
+                    hit_node.add_ref() # Effective hit means it should not be completely evicted until request is done/restarted.
                     self._kv_block_trie.add_hit(hit_node.color)
             last_virtual_full_block: KVBlockTrieNode = hit_trace[len(hit_trace) - 1]
             last_depth = last_virtual_full_block.depth
             if current_full_blocks > previous_have_blocks:
+                # Effective computational insert.
                 for i in range(previous_have_blocks, current_full_blocks):
                     last_depth += 1
                     assert (i + 1) * self._block_size <= len(request.tokens), f"{((i + 1) * self._block_size)} > {len(request.tokens)}"
                     current_virtual_full_block = KVBlockTrieNode(last_virtual_full_block, 
                                                                  tuple(request.tokens[i * self._block_size: (i + 1) * self._block_size]),
                                                                  self._kv_block_trie, last_depth)
+                    current_virtual_full_block.add_ref()
                     new_full_blocks_list.append((request.id, current_virtual_full_block))
                     last_virtual_full_block = current_virtual_full_block
             # print(f"Request {request.id} has {current_active_block} active blocks after counting current.")
@@ -176,11 +175,12 @@ class KVStorageController(BaseEntity):
             # Now fetch from disk to memory.
             # We know that it must be NOT in memory, so make space.
             # Loading into memory.
-            # print("1")
+
+            # FIXME: Now do not use sys buf for this.
             evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(1, 
                                                                                                             number_of_blocks_to_synced_to_memory, 
                                                                                                             timestamp, 
-                                                                                                            False, self._read_pipeline_buffer)
+                                                                                                            False, False)
             disk_read_channel = self._kv_block_trie.get_channel(1)[0]
             fetch_end_time, fetch_firlayer_time, per_layer_fetch_time = disk_read_channel.transmit(number_of_blocks_to_synced_to_memory *
                                                                                                    self._block_size, 
@@ -363,7 +363,7 @@ class KVStorageController(BaseEntity):
     
     
     # Space has even been acquired before.
-    def _insert_with_prepared_node_into_layer0(self, the_node: KVBlockTrieNode, end_time, end_firlayer_time, refcnt_inc: bool):
+    def _insert_with_prepared_node_into_layer0(self, the_node: KVBlockTrieNode, end_time, end_firlayer_time):
         parent_node = the_node.parent
         if the_node.tokens in parent_node.children:
             # Always fetch all the blocks, so if present, must be in GPU.
@@ -371,6 +371,10 @@ class KVStorageController(BaseEntity):
             # assert parent_node.children[the_node.tokens].check_if_color_present(0), f"id: {parent_node.children[the_node.tokens].id}\n{parent_node.children[the_node.tokens]._storage_layer_info}"
             # Note that the node can be from active blocks instead of a fetch, so it is reasonable to not be inside layer 0.
             the_node = parent_node.children[the_node.tokens]
+            # NOTE: Although have called add_ref in lookup && new full blocks, 
+            # that new block might not be inserted, but hit a previous block.
+            # so add_ref should switch.
+            the_node.add_ref()
             # Anyway, it should be inside layer 0 now.
             original_color = the_node.color
             # If is 0, nothing to do.
@@ -390,8 +394,7 @@ class KVStorageController(BaseEntity):
         else:
             # A new block.
             the_node = self._kv_block_trie.insert_with_prepared_new_node(the_node, 0, end_time, end_firlayer_time)
-        if refcnt_inc:
-            the_node.add_ref()
+            assert the_node.refcnt == 1
         return the_node
 
 
@@ -446,7 +449,7 @@ class KVStorageController(BaseEntity):
             # Timestamp updated inside.
             # Space also acquired inside.
             # Should have been fetched.
-            new_node = self._insert_with_prepared_node_into_layer0(the_node, end_time, end_firlayer_time, True)
+            new_node = self._insert_with_prepared_node_into_layer0(the_node, end_time, end_firlayer_time)
             if new_node == the_node:
                 real_insert += 1
             replace_list.append((reqid, new_node))
