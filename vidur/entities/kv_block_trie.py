@@ -23,7 +23,6 @@ class KVBlock:
     def get_size(self):
         return len(self.tokens)
 
-
 general_kv_block_size = None
 
 # TODO: Add some way to pin it to some layer(more than refcnt which prevents discarding).
@@ -97,7 +96,7 @@ class KVBlockTrieNode:
         # [0, color]
         i = 0
         while i < color:
-            assert self._children_color_cnt[i] == 0
+            assert self._children_color_cnt[i] == 0, f"{self.id} {i}\nself: {self._storage_layer_info}\nchild: {self._children_color_cnt}"
             i += 1
         return self._children_color_cnt[color] == 0
     
@@ -125,13 +124,17 @@ class KVBlockTrieNode:
         this_position = self._position_in_evict_heap
         another_position = another_node._position_in_evict_heap
         the_array = self._kvtrie.evict_candidates[self.color]
+        original_len = len(the_array)
         the_array[this_position] = another_node
         the_array[another_position] = self
         self._position_in_evict_heap = another_position
         another_node._position_in_evict_heap = this_position
+        now_len = len(the_array)
+        assert now_len == original_len
 
     def sift_up_evict_heap(self, unconditional: bool):
         the_array = self._kvtrie.evict_candidates[self.color]
+        original_len = len(the_array)
         position = self._position_in_evict_heap
         while position > 0:
             parent_position = (position - 1) // 2
@@ -142,9 +145,12 @@ class KVBlockTrieNode:
             position = parent_position
             assert self._position_in_evict_heap == position
             assert the_array[position] == self
+        now_len = len(the_array)
+        assert now_len == original_len
             
     def sift_down_evict_heap(self, unconditional: bool):
         the_array = self._kvtrie.evict_candidates[self.color]
+        original_len = len(the_array)
         position = self._position_in_evict_heap
         while position < len(the_array):
             left_child_position = 2 * position + 1
@@ -170,9 +176,12 @@ class KVBlockTrieNode:
             position = min_child_position
             assert self._position_in_evict_heap == position
             assert the_array[position] == self
+        now_len = len(the_array)
+        assert now_len == original_len
     
     def pop_self_root_in_evict_heap(self):
         the_array = self._kvtrie.evict_candidates[self.color]
+        original_len = len(the_array)
         assert len(the_array) > 0
         assert the_array[0] == self
         assert self._position_in_evict_heap == 0
@@ -184,9 +193,11 @@ class KVBlockTrieNode:
             last_node._position_in_evict_heap = 0
             the_array[0] = last_node
             last_node.sift_down_evict_heap(False)
+        assert len(the_array) == original_len - 1
 
     
     def remove_from_evict_heap(self):
+        # print(f"Remove block {self.id} from layer {self.color} evict heap.")
         color = self.color
         the_array = self._kvtrie.evict_candidates[color]
         orginal_len = len(the_array)
@@ -194,6 +205,7 @@ class KVBlockTrieNode:
         assert the_array[self._position_in_evict_heap] == self
         self.sift_up_evict_heap(True)
         self.pop_self_root_in_evict_heap()
+        # print(f"layer{color}: {orginal_len} --> {len(the_array)}")
         assert len(the_array) == orginal_len - 1
         
 
@@ -202,12 +214,14 @@ class KVBlockTrieNode:
         assert self.evict_timestamp[0] >= 0, f"{self.evict_timestamp}, id: {self.id}"
         assert self.evict_timestamp[1] < 0
         color = self.color
+        # print(f"Add block {self.id} to layer {color} evict heap.")
         the_array = self._kvtrie.evict_candidates[color]
         original_len = len(the_array)
         assert self._position_in_evict_heap == -1
         self._position_in_evict_heap = len(the_array)
         the_array.append(self)
         self.sift_up_evict_heap(False)
+        # print(f"layer{color}: {original_len} --> {len(the_array)}")
         assert len(the_array) == original_len + 1
         
     
@@ -220,13 +234,16 @@ class KVBlockTrieNode:
         color = self.color
         if self.is_in_evict_heap:
             if not is_leaf:
+                # print(f"{self.id} Remove from heap on leaf change to non-leaf.")
                 self.remove_from_evict_heap()
         else:
             if is_leaf:
                 if color == self._kvtrie.num_storage_layers - 1:
                     if self._refcnt == 0:
+                        # print(f"{self.id} Add to heap on leaf refcnt == 0.")
                         self.add_self_to_evict_heap()
                 else:
+                    # print(f"{self.id} Add to heap on is leaf.")
                     self.add_self_to_evict_heap()
 
     # Interal states on evictions, color, leaves.
@@ -236,11 +253,17 @@ class KVBlockTrieNode:
         assert not self._storage_layer_info[to_no][0]
         assert self.color == from_no # Should only be called when needing a fetch.
         # Anyway, need to remove from evict list of from_no layer cos color changed.
-        self.remove_from_evict_heap()
+        # print(f"{self.id} Remove from heap on fetch from {from_no} to {to_no}.")
+        # Color changed, but perhaps it is not in heap before.
+        if self.is_in_evict_heap:
+            self.remove_from_evict_heap()
         self.timestamp_update(timestamp)
         # Do not delete storage layer info of from_no, it is still there.
         # Update color.
         self._storage_layer_info[to_no] = (True, timestamp, layer_timestamp)
+        # print(f"{self.id}: {self._storage_layer_info}")
+        # print(f"Parent ID is {self.parent.id}")
+        # print(f"Parent color is {self.parent.color}")
         # Color changed from_no --> to_no(decreased).
         self.parent._children_color_cnt[from_no] -= 1
         assert self.parent._children_color_cnt[from_no] >= 0
@@ -298,7 +321,9 @@ class KVBlockTrieNode:
         # Because always evict higher layers of the same copy.
         # Guranteed by the fact that it is only in evict list of its color.
         # Anyway, need to remove from evict list of from_no layer cos color changed.
-        self.remove_from_evict_heap()
+        # print(f"{self.id} Remove from heap on evict from {from_no} to {to_no}.")
+        assert not self.is_in_evict_heap # Should have been removed from list ssin evict_selection.
+        # self.remove_from_evict_heap()
         # Update color.
         self._storage_layer_info[from_no] = (False, -1.0, -1.0)
         # Swap out once always true.
@@ -318,14 +343,20 @@ class KVBlockTrieNode:
         # Can make itself no longer a leaf, remove from evict_list.
         self.callback_on_possible_leaf_change()
     
+    def set_storage_layer_info_timestamps(self, layer_no, timestamp, layer_timestamp):
+        assert self._storage_layer_info[layer_no][0]
+        assert self._storage_layer_info[layer_no][1] == float("inf")
+        assert self._storage_layer_info[layer_no][2] == float("inf")
+        self._storage_layer_info[layer_no] = (True, timestamp, layer_timestamp)
+    
     def callback_on_insert_into_gpu(self, timestamp, layer_timestamp):
         # Only called when not in GPU before.
         # A new node.
         assert self.color == -1
-        assert not self.is_in_evict_heap
         assert not self._storage_layer_info[0][0]
         # Should be new in trie.
         assert len(self.children) == 0
+        assert not self.is_in_evict_heap # A new node, updated later in callback_on_possible_leaf_change.
         self._storage_layer_info[0] = (True, timestamp, layer_timestamp)
         # Update timestamps.
         self.timestamp_update(timestamp)
@@ -337,6 +368,7 @@ class KVBlockTrieNode:
         self.parent.callback_on_possible_leaf_change()
         self.callback_on_possible_leaf_change()
 
+
         
     def add_child_node(self, child_node):
         assert child_node.tokens not in self.children
@@ -347,8 +379,10 @@ class KVBlockTrieNode:
     
     def fetch_to_higher_location(self, complete_timestamp, complete_layer_timestamp):
         color = self.color
-        assert color > 0 # Only fetch to higher if not there.
+        assert color > 0, f"color: {color}" # Only fetch to higher if not there.
         higher_level_no = color - 1
+        # print(f"Fetch {self.id} from {color} to {higher_level_no}.")
+        # print(f"Before fetch: {self._storage_layer_info}\n")
         self.callback_on_fetch(color, higher_level_no, complete_timestamp, complete_layer_timestamp)
         return higher_level_no
 
@@ -364,6 +398,7 @@ class KVBlockTrieNode:
         return lower_level_no
     
     def evict_to_lower_location(self, complete_timestamp, complete_layer_timestamp):
+        assert not self.is_in_evict_heap # Should have been removed from list in evict_selection.
         color = self.color
         assert color >= 0
         lower_level_no = color + 1
@@ -373,6 +408,19 @@ class KVBlockTrieNode:
             already_inside = True
         self.callback_on_evict(color, lower_level_no, complete_timestamp, complete_layer_timestamp)
         return already_inside, lower_level_no
+    
+    def evict_to_discard(self):
+        color = self.color
+        assert color == self._kvtrie.num_storage_layers - 1
+        assert self._refcnt == 0
+        assert not self.is_in_evict_heap # Should have been removed from list in evict_selection.
+        self._storage_layer_info[color] = (False, -1.0, -1.0)
+        self.parent._children_color_cnt[color] -= 1
+        assert self.parent._children_color_cnt[color] >= 0
+        self.parent.callback_on_possible_leaf_change()
+        # For self, have been removed from evict list.
+        # Delete node outside from parent children.
+        # print(f"After evict to discard, color of {self.id} is {self.color}")
    
     def check_if_color_present(self, location_id):
         return self._storage_layer_info[location_id][0]
@@ -386,6 +434,7 @@ class KVBlockTrieNode:
                 # Only possible to be in one evict heap(colored one).
                 if self.is_in_evict_heap:
                     # No leaf changes, no color changes.
+                    # print(f"{self.id} Remove from heap on refcnt increase.")
                     self.remove_from_evict_heap()
         self._refcnt += 1
     
@@ -399,8 +448,7 @@ class KVBlockTrieNode:
             assert last_layer_no >= 0
             if self.color == last_layer_no:
                 assert not self.is_in_evict_heap
-                # TODO: Update timestamp to newest first??!!
-                self.add_self_to_evict_heap()
+                self.callback_on_possible_leaf_change()
 
     @property
     def refcnt(self):
@@ -489,19 +537,12 @@ class KVBlockTrie:
         self._print_trie_node(self.root)
 
     def delete_node(self, node: KVBlockTrieNode):
-        assert node.color == self.num_storage_layers - 1
+        assert node.color == -1 # Call evict_discard just before it.
         assert node.refcnt == 0
         assert not node.is_in_evict_heap # Removed on selection.
-        if len(node.children) != 0:
-            print(f"{node.id} -len{len(node.children)}-> {next(iter(node.children.values())).id}")
-            # self._print_trie()
         assert len(node.children) == 0, f"{node.id} -len{len(node.children)}-> {next(iter(node.children.values())).id}"
         del node.parent.children[node.tokens]
-        parent_node = node.parent
-        node.parent = None
-        parent_node._children_color_cnt[node.color] -= 1 # Only called on delete from last layer.
-        assert parent_node._children_color_cnt[node.color] >= 0
-        parent_node.callback_on_possible_leaf_change()
+        # Update of parent in evict_to_discard.
         
     
     def _evict_blocks(self, layer_no, evict_number, timestamp, no_write: bool) -> Tuple[float, float, float]:
@@ -509,51 +550,45 @@ class KVBlockTrie:
         if evict_number == 0:
             return timestamp, timestamp, 0.0
         # Synced evict.
-        # print(f"Evicting {evict_number} blocks from layer {layer_no}")
         # Select blocks.
         # Modify trie to record eviction.
         # free space.
         # Return end_time, first_layer_end_time, per_layer_time_interval.
         assert layer_no >= 0
         assert layer_no < self.num_storage_layers
-        evict_selection = self.eviction_selection[layer_no]
+        evict_selection_function = self.eviction_selection[layer_no]
+        # print(f"Layer {layer_no} evicting {evict_number} blocks.")
         # Should have beend removed from list in evict_selection.
-        total_layer_cnt = len(self._evict_candidates)
-        write_to_next_layer = []
+        total_layer_cnt = self.num_storage_layers
+        assert total_layer_cnt == len(self._num_blocks)
+        write_to_next_layer: List[KVBlockTrieNode] = []
         evicted_nodes = []
+        # callback on evict: Heap update && color info && leaf info of parent && evict candidates of parent and self.
         for _ in range(evict_number):
+            # Should update evict set inside the loop, or when evict_number if large, it will run out of candidates.
             self.add_evict(layer_no)
-            evict_node: KVBlockTrieNode = evict_selection(layer_no)
+            evict_node: KVBlockTrieNode = evict_selection_function(layer_no)
             assert evict_node is not None
             evicted_nodes.append(evict_node)
-            if layer_no == total_layer_cnt - 1:
-                # Must be discard.
-                assert evict_node.refcnt == 0
-                # Discard.
-                # Remove from evict list, it must be inside.
-                # print(f"{evict_node.id} deleted.\n")
+            assert evict_node.parent is not None
+            original_color = evict_node.color
+            assert original_color == layer_no
+            if original_color == total_layer_cnt - 1:
+                evict_node.evict_to_discard()
                 self.delete_node(evict_node)
             else:
-                # Just to lower layer.
-                # Check if a write is needed.
                 if not evict_node.check_if_color_present(layer_no + 1):
-                    # Not in the next layer.
                     assert not no_write
-                    '''
-                    if no_write:
-                        next_next_layer_no = layer_no + 2
-                        if next_next_layer_no < total_layer_cnt:
-                            # Then it cannot be in next next.
-                            assert not evict_node.check_if_color_present(next_next_layer_no)
-                        else:
-                            raise ValueError("No write but no color in lower layers.")
-                    else:
-                    '''
                     # Should write.
                     # The evicted block is not in the next layer before.
                     write_to_next_layer.append(evict_node)
+                # Call this even if already inside, to delete from current layer.
+                already_inside, wno = evict_node.evict_to_lower_location(float("inf"), float("inf"))
+                assert wno == layer_no + 1
+            # This is for updating eviction candidates.
+            # Update ending time later.
 
-                # Present in next layer otherwise, do not need to write.
+            # Present in next layer otherwise, do not need to write.
 
         blocks_needed_for_next_layer = len(write_to_next_layer)
         evict_end_time = 0.0
@@ -584,16 +619,16 @@ class KVBlockTrie:
             write_first_layer_end_time = timestamp
             write_per_layer_time_interval = 0.0
 
-        self.add_insert(len(write_to_next_layer))
+        if layer_no < self.num_storage_layers - 1:
+            self.add_insert(layer_no + 1, len(write_to_next_layer))
+        # Insert to next layer.
+        # Note that callback_on_evict only 
         # Every evicted but not deleted node has color change.
-        for evict_node in evicted_nodes:
-            if evict_node.parent is not None:
-                original_color = evict_node.color
-                assert original_color == layer_no
-                already_inside, wno = \
-                    evict_node.callback_on_evict(original_color, original_color + 1, 
-                                                 write_end_time, write_first_layer_end_time)
-                assert wno == original_color + 1
+
+        # Update the ready time.
+        for node in write_to_next_layer:
+            # If not, discarded or already in before.
+            node.set_storage_layer_info_timestamps(layer_no + 1, write_end_time, write_first_layer_end_time)
         
         # Mark freed space.
         self._used_blocks[layer_no] -= evict_number
@@ -708,22 +743,49 @@ class KVBlockTrie:
         # Color and timestamp also updated here.
         the_node.callback_on_insert_into_gpu(timestamp, layer_timestamp)
         return the_node
+    
+    def insert_into_gpu_from_active_block_with_original_in_cpu(self, the_node: KVBlockTrieNode, 
+                                                               timestamp, layer_timestamp):
+        # Timestamp to tell when this ready(after execution).
+        self.add_insert(0)
+        # Fetch to higher, but without cost.
+        # Space should be acquired, cos active blocks released before.
+        # Just fetch this node, not parent.
+        the_node.fetch_to_higher_location(timestamp, layer_timestamp)
+        self._used_blocks[0] += 1
+        assert self._used_blocks[0] <= self._num_blocks[0]
+        assert self._used_blocks[0] <= self._num_threshold_blocks[0]
+        return the_node
+    
+    '''
+    def insert_into_gpu_from_active_block_original_in_disk(self, the_node: KVBlockTrieNode,timestamp, layer_timestamp):
+        self.add_insert(0)
+        self.add_insert(1)
+        last_node: KVBlockTrieNode = the_node.parent
+        assert the_node.tokens in last_node.children
+        assert the_node.color == 2 # Originally in disk.
+        # Return the node to make it write to CPU later.
+        last_node.fetch_to_higher_location(timestamp, layer_timestamp)
+        last_node.fetch_to_higher_location(timestamp, layer_timestamp)
+    '''
+
 
     
     def evict_selection_lru(self, layer_no: int):
         # Choose one block, which is one edge.
         # Node is representing the edge.
-        assert len(self._evict_candidates) > layer_no
-        assert len(self._evict_candidates[layer_no]) > 0
-        evicted_node: KVBlockTrieNode = self._evict_candidates[layer_no][0]
+        assert len(self.evict_candidates) > layer_no
+        assert len(self.evict_candidates[layer_no]) > 0, f"Layer {layer_no} has no evict candidates."
+        evicted_node: KVBlockTrieNode = self.evict_candidates[layer_no][0]
         if self.num_storage_layers == 1:
             assert len(evicted_node.children) == 0
             # print(f"Evict timestamp {evicted_node.evict_timestamp}")
         assert evicted_node is not None
         assert evicted_node.position_in_evict_heap == 0
-        original_size = len(self._evict_candidates[layer_no])
-        evicted_node.pop_self_root_in_evict_heap()
-        assert len(self._evict_candidates[layer_no]) == original_size - 1
+        original_size = len(self.evict_candidates[layer_no])
+        # print(f"{evicted_node.id} Remove from heap on selection.")
+        evicted_node.remove_from_evict_heap()
+        assert len(self.evict_candidates[layer_no]) == original_size - 1
         return evicted_node
     
     def add_insert(self, layer_no: int, add_number: int = 1):
@@ -739,7 +801,7 @@ class KVBlockTrie:
         self._num_blocks.append(num_blocks)
         self._used_blocks.append(0)
         self._num_threshold_blocks.append(threshold_blocks)
-        print(f"layer: {len(self._num_blocks) - 1}, num_blocks: {num_blocks}, threshold_blocks: {threshold_blocks}")
+        # print(f"layer: {len(self._num_blocks) - 1}, num_blocks: {num_blocks}, threshold_blocks: {threshold_blocks}")
         self._channel_from_this_to_lower.append((Channel(read_thput, space_per_token_per_layer), Channel(write_thput, space_per_token_per_layer)))
         # FIXME: Now only LRU.
         assert evict_policy.upper() == "LRU"
