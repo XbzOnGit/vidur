@@ -361,37 +361,6 @@ class KVStorageController(BaseEntity):
     def num_layers(self):
         return self._num_layers
     
-    def write_through_async_to_CPU(self, new_full_blocks_list :List[Tuple[int, KVBlockTrieNode]], 
-                                   timestamp, num_layer: int):
-        # Here we should ONLY launch write.
-        # And return time point that this layer is ready in CPU memory.
-
-        # Can trigger eviction in CPU memory.
-        # Filter new_full_blocks set.
-        new_list = []
-        for new_block in new_full_blocks_list:
-            reqid, the_node = new_block
-            parent = the_node.parent
-            assert reqid in self._active_blocks
-            assert len(the_node.tokens) == self._block_size, f"{len(the_node.tokens)} != {self._block_size}"
-            if the_node.tokens not in parent.children:
-                new_list.append(new_block)
-            else:
-                node: KVBlockTrieNode = parent.children[the_node.tokens]
-                if not node.check_if_color_present(1):
-                    new_list.append(new_block)
-
-        needed_block_number = len(new_list)
-        # This is writing to layer 1, so do not use the buffer.
-        # print("7")
-        end_time, end_fir_time, per_layer_time = self._kv_block_trie.synced_acquire_space(1, 
-                                                needed_block_number, timestamp, False, False)
-        # That buffer is used for fetch, so false for use_shadow_buf flag.
-        write_channel = self._kv_block_trie.get_channel(0)[1]
-        end_write, end_firlay_write, per_layer_write_time = \
-        write_channel.transmit(needed_block_number * self._block_size, end_time, num_layer)
-        return end_write, end_firlay_write, per_layer_write_time
-
     
     # Space has even been acquired before.
     def _insert_with_prepared_node_into_layer0(self, the_node: KVBlockTrieNode, end_time, end_firlayer_time, refcnt_inc: bool):
@@ -426,6 +395,32 @@ class KVStorageController(BaseEntity):
         return the_node
 
 
+    def filter_write_to_CPU_and_preaccess(self, new_full_blocks_list :List[Tuple[int, KVBlockTrieNode]], timestamp):
+        new_list: List[Tuple[int, KVBlockTrieNode]] = []
+        for new_block in new_full_blocks_list:
+            reqid, the_node = new_block
+            parent = the_node.parent
+            assert reqid in self._active_blocks
+            assert len(the_node.tokens) == self._block_size, f"{len(the_node.tokens)} != {self._block_size}"
+            if the_node.tokens not in parent.children:
+                new_list.append(new_block)
+            else:
+                node: KVBlockTrieNode = parent.children[the_node.tokens]
+                if not node.check_if_color_present(1):
+                    new_list.append(new_block)
+        for new_block in new_list:
+            reqid, the_node = new_block
+            # Preaccess only when inside heap, to pin it.
+            if the_node.is_in_evict_heap:
+                # If inside evict heap, need to pin it.
+                the_node.timestamp_update(timestamp)
+        return new_list
+    
+    def make_space_for_CPU(self, number_of_blocks_to_write: int, timestamp):
+        return self._kv_block_trie.synced_acquire_space(1, number_of_blocks_to_write, timestamp, False, False)
+    
+    def use_channel(self, storage_layer, block_number, op_type, timestamp, num_layer):
+        return self._kv_block_trie.get_channel(storage_layer)[op_type].transmit(block_number * self._block_size, timestamp, num_layer)
 
     # Switch into cache with a list of timepoints
     def switch_active_fullblocks_into_cache(self, new_full_blocks_list: List[Tuple[int, KVBlockTrieNode]],

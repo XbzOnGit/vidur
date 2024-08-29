@@ -4,7 +4,6 @@ from vidur.entities.communications import Channel
 import atexit
 
 
-
 # The exposed APIs should return the timestamp that it is possible for the next operations.
 # Like a complete timestamp and a layer timestamp, and a per layer time interval.
 # Then controller can return organize the time to start execution and end execution based on this.
@@ -302,7 +301,7 @@ class KVBlockTrieNode:
     
     def timestamp_update(self, new_access_time):
         color = self.color
-        assert color >= 0
+        assert color >= 0, f"{self.id} {color}"
         assert self._storage_layer_info[color][0]
         old_access_time = self._evict_timestamp[0]
         self._evict_timestamp = (new_access_time, -self.depth)
@@ -647,6 +646,10 @@ class KVBlockTrie:
     # Also mark the space as used in this function.
     def synced_acquire_space(self, layer_no, block_number: int, timestamp, no_write: bool, use_buf: bool) -> Tuple[float, float, float]:
         availble_blocks_without_buffer = self.available_blocks(layer_no)
+        # print(f"Layer {layer_no} available blocks: {availble_blocks_without_buffer}")
+        # print(f"Layer {layer_no} acquires {block_number} blocks.")
+        # Print the function name of the traceback above this function.
+        # print(f"Function name: {inspect.currentframe().f_back.f_code.co_name}")
         assert availble_blocks_without_buffer >= 0
         if availble_blocks_without_buffer >= block_number:
             # Use that space.

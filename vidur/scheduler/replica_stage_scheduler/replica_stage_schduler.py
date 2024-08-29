@@ -56,7 +56,6 @@ class ReplicaStageScheduler:
             ready_exec_timeinfo, new_full_blocks_list =  self._kv_cache_controller.on_batch_stage(batch, timestamp)
         start_first_exec_time, load_per_layer_time = ready_exec_timeinfo
 
-
         # Note that the fetch overhead here means the overhead that got stuck on cache fetch.
         # It can be zero because already in GPU or can be zero due to pipeline.
         execution_time = self._execution_time_predictor.get_execution_time(
@@ -69,9 +68,20 @@ class ReplicaStageScheduler:
             end_last_exec_time = timestamp
             end_last_preload_time = start_first_exec_time
             end_exec_of_first_layer = None
+            cpu_make_space_per_layer_time = None
+            end_last_cpu_make_space_layer_time = None
             
             assert timestamp <= start_first_exec_time, f"{timestamp} > {start_first_exec_time}"
             async_write_list = []
+            if self._kv_cache_controller._gpu_write_through_cpu:
+                # If not, do not write to CPU here.
+                # FIXME: Does this naturally pin the blocks??!!
+                new_list = self._kv_cache_controller.filter_write_to_CPU_and_preaccess(new_full_blocks_list, timestamp)
+                needed_block_number = len(new_list)
+                end_cpu_make_space_time, end_cpu_make_space_fir_time, cpu_make_space_per_layer_time = \
+                self._kv_cache_controller.make_space_for_CPU(needed_block_number, timestamp)
+                end_last_cpu_make_space_layer_time = timestamp # Get per layer time that CPU memory is available.
+                # Make CPU has this much space to write to, can trigger eviction to disks.
             for _ in range(self._kv_cache_controller.num_layers):
                 start_this_exec_time = max(end_last_exec_time, end_last_preload_time)
                 end_this_exec_time = start_this_exec_time + per_layer_execution_time
@@ -80,10 +90,15 @@ class ReplicaStageScheduler:
                 # Launch async write.
                 if self._kv_cache_controller._gpu_write_through_cpu:
                     # Has filtered to not present in CPU in write_through inside this function.
+                    write_timepoint = max(end_last_cpu_make_space_layer_time, end_this_exec_time)
+                    # Should be execed && have enough CPU space.
+                    # Note that it is 0 --> 1 write, so layer_no is 0.
                     end_aw, end_faw, end_per_aw = \
-                        self._kv_cache_controller.write_through_async_to_CPU(new_full_blocks_list, end_this_exec_time, 1)
+                    self._kv_cache_controller.use_channel(0, needed_block_number, 1, write_timepoint, 1)
                     assert end_aw == end_faw, f"{end_aw} != {end_faw}"
                     async_write_list.append(end_aw)
+                    # Assume make space is continuous.
+                    end_last_cpu_make_space_layer_time += cpu_make_space_per_layer_time
                 end_last_exec_time = end_this_exec_time
                 # Assume that preload is continuous.
                 end_last_preload_time += load_per_layer_time
