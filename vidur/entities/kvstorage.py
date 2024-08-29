@@ -365,6 +365,7 @@ class KVStorageController(BaseEntity):
     # Space has even been acquired before.
     def _insert_with_prepared_node_into_layer0(self, the_node: KVBlockTrieNode, end_time, end_firlayer_time):
         parent_node = the_node.parent
+        # extra_node_for_async_write_through = False
         if the_node.tokens in parent_node.children:
             # Always fetch all the blocks, so if present, must be in GPU.
             # No need to update timestamp, already counted on hit.
@@ -386,11 +387,20 @@ class KVStorageController(BaseEntity):
                     # Then in active blocks, find the same block in cache, but not in GPU.
                     # This will push it into layer 0, with that active block as space.
                     # Later write through is naturally omitted.
+
+                    # This will not introduce overhead.
                     self._kv_block_trie.insert_into_gpu_from_active_block_with_original_in_cpu(the_node, 
                                                                                                end_time, end_firlayer_time)
                 else:
                     assert original_color == 2
-                    raise NotImplementedError("Not implemented yet.")
+                    assert self._gpu_write_through_cpu
+                    # This can rely on later write through.
+                    # extra_node_for_async_write_through = True
+                    # self._kv_block_trie.insert_into_gpu_from_active_block_original_in_disk(the_node, 
+                    #                                                                        end_time, end_firlayer_time)
+                    self._kv_block_trie.insert_into_gpu_from_active_block_original_in_disk_allow_tft(the_node, 
+                                                                                                        end_time, 
+                                                                                                        end_firlayer_time)
         else:
             # A new block.
             the_node = self._kv_block_trie.insert_with_prepared_new_node(the_node, 0, end_time, end_firlayer_time)

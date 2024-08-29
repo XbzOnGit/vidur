@@ -284,6 +284,22 @@ class KVBlockTrieNode:
         # TODO: Further improvement: Know the batch not request, 
         # we can pre-access those already in GPU once, to make them 
         # not evicted then loaded when preparing the batch.
+    
+    # [True, False, True]
+    def callback_on_switch_to_layer0_tft(self, timestamp, layer_timestamp):
+        assert not self._storage_layer_info[0][0]
+        assert not self._storage_layer_info[1][0]
+        assert self._storage_layer_info[2][0]
+        if self.is_in_evict_heap:
+            self.remove_from_evict_heap()
+        self.timestamp_update(timestamp)
+        self._storage_layer_info[0] = (True, timestamp, layer_timestamp)
+        self.parent._children_color_cnt[2] -= 1
+        assert self.parent._children_color_cnt[2] >= 0
+        assert self.parent._children_color_cnt[0] >= 0
+        self.parent._children_color_cnt[0] += 1
+        self.parent.callback_on_possible_leaf_change()
+        self.callback_on_possible_leaf_change()
 
     # NOTE: When a node is pushed to lower layer in write-through, no color change at all.
     # So no leaf change and candidate changes.
@@ -760,17 +776,26 @@ class KVBlockTrie:
         assert self._used_blocks[0] <= self._num_blocks[0]
         assert self._used_blocks[0] <= self._num_threshold_blocks[0]
         return the_node
-    
+    # Allow [True, False, True]
+    def insert_into_gpu_from_active_block_original_in_disk_allow_tft(self, the_node: KVBlockTrieNode, timestamp, 
+                                                                     layer_timestamp):
+        self.add_insert(0)
+        the_node.callback_on_switch_to_layer0_tft(timestamp, layer_timestamp)
     '''
-    def insert_into_gpu_from_active_block_original_in_disk(self, the_node: KVBlockTrieNode,timestamp, layer_timestamp):
+    def insert_into_gpu_from_active_block_original_in_disk(self, the_node: KVBlockTrieNode, timestamp, layer_timestamp):
+        # Now simply fetch twice, and use fake timestamp for CPU layer.
+        # Then set those timestamps to real ones later.
         self.add_insert(0)
         self.add_insert(1)
-        last_node: KVBlockTrieNode = the_node.parent
-        assert the_node.tokens in last_node.children
-        assert the_node.color == 2 # Originally in disk.
-        # Return the node to make it write to CPU later.
-        last_node.fetch_to_higher_location(timestamp, layer_timestamp)
-        last_node.fetch_to_higher_location(timestamp, layer_timestamp)
+        # We do write from GPU, but logically the same to fetch twice from disk in the view of evictions and leaves/colors.
+        the_node.fetch_to_higher_location(float("inf"), float("inf"))
+        the_node.fetch_to_higher_location(timestamp, layer_timestamp)
+        self._used_blocks[0] += 1 # Active blocks released before, acquire back.
+        assert self._used_blocks[0] <= self._num_blocks[0]
+        assert self._used_blocks[0] <= self._num_threshold_blocks[0]
+        # NOTE: Do not +1 for layer 1, make this +1 in async write through.
+        # NOTE: Remember to update the timestamp later.
+        return the_node
     '''
 
 
