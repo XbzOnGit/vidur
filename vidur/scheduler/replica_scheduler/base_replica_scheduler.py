@@ -12,6 +12,8 @@ from vidur.scheduler.replica_stage_scheduler import ReplicaStageScheduler
 from vidur.scheduler.utils.memory_planner import MemoryPlanner
 from vidur.entities import KVStorageController
 
+from collections import deque
+
 logger = init_logger(__name__)
 
 
@@ -158,7 +160,7 @@ class BaseReplicaScheduler(ABC):
             f"Obtained max batch size of {self._max_batch_size} for replica {self._replica_id}"
         )
 
-        self._request_queue = []
+        self._request_queue = deque()
         self._num_allocated_blocks = 0
         self._allocation_map = {}
         self._replica_stage_schedulers = {

@@ -96,7 +96,7 @@ class LightLLMReplicaScheduler(BaseReplicaScheduler):
             if not self._can_allocate_request(request):
                 break
 
-            request = self._request_queue.pop(0)
+            request = self._request_queue.popleft()
 
             self._allocate_request(request)
             requests.append(request)

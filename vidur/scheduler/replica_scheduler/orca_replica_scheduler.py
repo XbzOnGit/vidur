@@ -41,7 +41,7 @@ class OrcaReplicaScheduler(BaseReplicaScheduler):
             if not self.can_allocate(self._max_blocks_per_sequence):
                 break
 
-            request = self._request_queue.pop(0)
+            request = self._request_queue.popleft()
 
             self.allocate(request.id, self._max_blocks_per_sequence)
             next_num_tokens = self._get_request_next_num_tokens(request)

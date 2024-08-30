@@ -116,11 +116,11 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
                     victim_request = self._preempted_requests.pop(-1)
                     victim_request.restart()
                     self.free(victim_request.id)
-                    self._request_queue = [victim_request] + self._request_queue
+                    self._request_queue.appendleft(victim_request)
                 else:
                     request.restart()
                     self.free(request.id)
-                    self._request_queue = [request] + self._request_queue
+                    self._request_queue.appendleft(request)
                     break
             else:
                 self._allocate_request(request)
@@ -170,7 +170,7 @@ class SarathiReplicaScheduler(BaseReplicaScheduler):
             if next_num_tokens == 0:
                 break
 
-            request = self._request_queue.pop(0)
+            request = self._request_queue.popleft()
 
             self._allocate_request(request)
 

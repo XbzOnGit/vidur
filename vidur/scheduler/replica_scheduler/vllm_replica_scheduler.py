@@ -28,11 +28,15 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
 
         for request in batch.requests:
             if request.completed:
-                self.free(request.id)
+                self.free(request.id) # Free space managed by this request.
+                # Will call kv_controller to free those active blocks.
             else:
                 self._preempted_requests.append(request)
+                # Requests that has some processed tokens, but not completed.
+                # These should be scheduled in another batch.
 
     def _can_allocate_request(self, request: Request) -> bool:
+        # For new request, the first run is prefill, so allocate blocks for it.
         if request.id not in self._allocation_map:
             # new request
             num_required_blocks = ceil(
@@ -44,7 +48,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
                 - num_required_blocks
                 >= self._watermark_blocks
             )
-
+        # For old request, just make sure that there is at least one more block available.
         # vllm requires at least one block to be available
         return self._config.num_blocks - self._num_allocated_blocks >= 1
 
@@ -52,6 +56,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
         if request.id not in self._allocation_map:
             # new request
             # Allocate for prefill.
+            # For vllm scheduler, the first run will finish prefill.
             num_required_blocks = ceil(
                 (request.num_prefill_tokens) / self._config.block_size
             )
@@ -67,7 +72,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
 
         if num_tokens_required == 0:
             return
-
+        # Can have one more block for non-prefill ones.
         self.allocate(request.id, 1)
 
     def _get_next_batch(self) -> Batch:
@@ -81,11 +86,10 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             next_num_tokens = self._get_request_next_num_tokens(request)
 
             if not self._can_allocate_request(request):
-                # At least have space for prefill.
                 break
 
             new_num_tokens = num_tokens + [next_num_tokens]
-            new_num_batch_tokens = len(new_num_tokens) * max(new_num_tokens)
+            new_num_batch_tokens = len(new_num_tokens) * max(new_num_tokens) # Pad to max tokens in batch.
             # Make more constraints on KV cache size used here.
             # Original vidur does not have inter-request KV cache, so kv_size is 0 on prefill.
 
@@ -98,7 +102,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             if len(requests) == self._max_micro_batch_size:
                 break
 
-            request = self._request_queue.pop(0)
+            request = self._request_queue.popleft()
 
             self._allocate_request(request)
             requests.append(request)
@@ -123,11 +127,11 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
                     victim_request = self._preempted_requests.pop(-1)
                     victim_request.restart()
                     self.free(victim_request.id)
-                    self._request_queue = [victim_request] + self._request_queue
+                    self._request_queue.appendleft(victim_request)
                 else:
                     request.restart()
                     self.free(request.id)
-                    self._request_queue = [request] + self._request_queue
+                    self._request_queue.appendleft(request)
                     break
             else:
                 self._allocate_request(request)
