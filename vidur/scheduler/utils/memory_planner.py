@@ -36,6 +36,7 @@ class MemoryPlanner:
             * 1024**3
             * (1 - self._replica.memory_margin_fraction) - self._space_for_buffer
         )
+        # print(f"available_memory: {available_memory}")
         parameter_memory_per_device = self._get_parameter_memory_per_device()
         kv_cache_memory_per_device_per_request = (
             self._get_kv_cache_memory_per_device_per_request()
@@ -49,7 +50,7 @@ class MemoryPlanner:
         assert (
             number_of_requests > 0
         ), "Not enough memory to store even a single request"
-
+        # print(f"number_of_requests: {number_of_requests}")
         return number_of_requests
 
     def get_max_request_slots(self) -> int:

@@ -683,8 +683,7 @@ class KVBlockTrie:
                 # This buffer is used for loading into layer_no.
                 read_buffer_blocks = self.read_buffer_blocks(layer_no)
                 assert read_buffer_blocks >= 0
-                # Should always be available when use_buf is True.
-                assert read_buffer_blocks >= should_make_space
+                assert read_buffer_blocks >= should_make_space, f"{read_buffer_blocks} < {should_make_space}"
                 # Make another call outside for remaining ones.
                 # No synced time.
                 self._used_blocks[layer_no] += block_number
@@ -693,7 +692,7 @@ class KVBlockTrie:
                 # FIXME: Assume that the read buffer is available before the end execution of last batch.
                 # FIXME: Assume that write through is used, so evict time to get back read buffer is 0.
                 # The purpose here is to mark the space as free, so that read buffer is back.
-                # Swap the space for read buffer.
+                # Also swap the space for read buffer.
                 evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_write)
                 assert evict_per == 0
                 assert evict_end == timestamp

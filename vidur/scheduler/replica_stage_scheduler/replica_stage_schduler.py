@@ -115,6 +115,7 @@ class ReplicaStageScheduler:
         else:
             end_execution_time = start_first_exec_time + execution_time.total_time
             new_full_blocks_list = []
+        # TODO: Check total execution time here.
         total_execution_time = end_execution_time - timestamp
         model_execution_time = execution_time.model_time
         batch_stage = BatchStage(
@@ -126,5 +127,31 @@ class ReplicaStageScheduler:
             batch.requests,
             batch.num_tokens,
         )
-        # self._batch, self._batch_stage, execution_time, start_fir_time, end_exec_time, new_full_blocks_list
+        '''
+        print(f"Replica stage {batch_stage.id} total execution time returned by predictor: ", execution_time.total_time)
+        print(f"Replica stage {batch_stage.id} total execution time calculated: ", total_execution_time)
+        print(f"Batch token number is {batch.num_tokens}")
+        # NOTE: Some of execution time is in ms, so convert to seconds.
+        print(f"prefill time on one batch_stage {batch_stage.id}: {execution_time.attention_prefill_execution_time * 1e-3}")
+        print(f"decode time on one batch_stage {batch_stage.id}: {execution_time.attention_decode_execution_time * 1e-3}\n")
+        print(f"attention_layer_pre_proj_execution_time: {execution_time._attention_layer_pre_proj_execution_time * 1e-3}")
+        print(f"attention_layer_post_proj_execution_time: {execution_time._attention_layer_post_proj_execution_time * 1e-3}")
+        print(f"attention_rope_execution_time: {execution_time._attention_rope_execution_time * 1e-3}")
+        print(f"attention_kv_cache_save_execution_time: {execution_time._attention_kv_cache_save_execution_time * 1e-3}")
+        print(f"attention_decode_execution_time: {execution_time._attention_decode_execution_time * 1e-3}")
+        print(f"attention_prefill_execution_time: {execution_time._attention_prefill_execution_time * 1e-3}")
+        print(f"tensor_parallel_communication_time: {execution_time._tensor_parallel_communication_time * 1e-3}")
+        print(f"attn_norm_time: {execution_time._attn_norm_time * 1e-3}")
+        print(f"mlp_layer_up_proj_execution_time: {execution_time._mlp_layer_up_proj_execution_time * 1e-3}")
+        print(f"mlp_layer_down_proj_execution_time: {execution_time._mlp_layer_down_proj_execution_time * 1e-3}")
+        print(f"mlp_layer_act_execution_time: {execution_time._mlp_layer_act_execution_time * 1e-3}")
+        print(f"tensor_parallel_communication_time: {execution_time._tensor_parallel_communication_time * 1e-3}")
+        print(f"mlp_norm_time: {execution_time._mlp_norm_time * 1e-3}")
+        print(f"get_attention_layer_execution_time: {execution_time._get_attention_layer_execution_time() * 1e-3}")
+        print(f"get_mlp_layer_execution_time: {execution_time._get_mlp_layer_execution_time() * 1e-3}")
+        print(f"add_time: {execution_time._add_time * 1e-3}")
+        print(f"block_execution_time: {execution_time._get_block_execution_time() * 1e-3}")
+        print(f"block_execution_time * num_layers_per_pipeline_stage: {execution_time._get_block_execution_time() * 1e-3 * execution_time._num_layers_per_pipeline_stage}")
+        print(f"model_time: {execution_time.model_time}, cpu_overhead: {execution_time.total_time - execution_time.model_time}\n\n\n")
+        '''
         return batch, batch_stage, execution_time, start_first_exec_time, end_execution_time, new_full_blocks_list

@@ -247,9 +247,14 @@ class BaseReplicaScheduler(ABC):
         pass
 
     def on_schedule(self, timestamp) -> List[Batch]:
+        # print(f"Replica {self._replica_id} on_schedule at {timestamp}")
         scheduled_batches = []
         self._last_on_schedule_time = timestamp
+        # NOTE: When on_schedule is called, sometimes it will NOT 
+        # return a batch, when there are no more requests to schedule OR 
+        # _num_running_batches is already equal to _num_stages(busy computation device).
         while self._num_running_batches < self._num_stages:
+            # print(f"Replica {self._replica_id} _get_next_batch at {timestamp}")
             batch = self._get_next_batch()
             if not batch:
                 break

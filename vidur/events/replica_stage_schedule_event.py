@@ -29,11 +29,11 @@ class ReplicaStageScheduleEvent(BaseEvent):
             self._replica_id
         ]._replica_stage_schedulers[self._stage_id]
 
-        self._batch, self._batch_stage, execution_time, start_fir_time, end_exec_time, new_full_blocks_list = stage_scheduler.on_schedule(self.time)
-
+        self._batch, self._batch_stage, execution_time, \
+            start_fir_time, end_exec_time, new_full_blocks_list = stage_scheduler.on_schedule(self.time)
+        
         if not (self._batch and self._batch_stage):
             return []
-
         self._batch_stage.on_schedule(self.time)
         metrics_store.on_replica_stage_schedule(
             self.time,
@@ -44,6 +44,7 @@ class ReplicaStageScheduleEvent(BaseEvent):
         )
 
         self._is_last_stage = stage_scheduler.is_last_stage
+        # print(f"Recorded time to batch stage {self._batch_stage.id} end takes {self._batch_stage.execution_time}")
         return [
             BatchStageEndEvent(
                 self.time + self._batch_stage.execution_time,

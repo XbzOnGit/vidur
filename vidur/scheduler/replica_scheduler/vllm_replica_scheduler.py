@@ -79,13 +79,14 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
         requests = []
         num_tokens = []
         num_batch_tokens = 0
-
+        # _request_queue is in order of arrival.
         while self._request_queue:
             request = self._request_queue[0]
 
             next_num_tokens = self._get_request_next_num_tokens(request)
 
             if not self._can_allocate_request(request):
+                # print(f"Out of loop one cos not can_allocate_request.")
                 break
 
             new_num_tokens = num_tokens + [next_num_tokens]
@@ -94,12 +95,17 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             # Original vidur does not have inter-request KV cache, so kv_size is 0 on prefill.
 
             if new_num_batch_tokens > self._config.max_tokens_in_batch:
+                # print(f"Out of loop one cos new_num_batch_tokens: {new_num_batch_tokens} > max_tokens_in_batch: {self._config.max_tokens_in_batch}")
                 break
 
             if len(self._allocation_map) == self._config.batch_size_cap:
+                # How many requests are allocated at the same time in total.
+                # print(f"Out of loop one cos len(self._allocation_map): {len(self._allocation_map)} == batch_size_cap: {self._config.batch_size_cap}")
                 break
 
             if len(requests) == self._max_micro_batch_size:
+                # How many requests in the current batch.
+                # print(f"Out of loop one cos len(requests): {len(requests)} == max_micro_batch_size: {self._max_micro_batch_size}")
                 break
 
             request = self._request_queue.popleft()
@@ -108,19 +114,31 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             requests.append(request)
             num_tokens.append(next_num_tokens)
             num_batch_tokens += next_num_tokens
-
+        # if not self._request_queue:
+            # print(f"Out of loop one cos no more requests in queue.")
         if requests:
             return Batch(self._replica_id, requests, num_tokens)
+        # If there is something in request queue, schedule it.
+        # else check preempted requests.
+        # It prefers those not computed at all.
 
         # Safer to sort preempted_requests to maintain FIFO order
         self._preempted_requests.sort(key=lambda r: r.arrived_at)
         # all preempted_requests will have prefill completed
+
+        # Here it is batching preempted requests to max_micro_batch_size or 
+        # a later request is not able to allocate blocks even if all the preempted requests
+        # later freed.
         while self._preempted_requests:
             if len(requests) == self._max_micro_batch_size:
+                # print(f"Out of loop outter two cos len(requests): {len(requests)} == max_micro_batch_size: {self._max_micro_batch_size}")
                 break
 
             request = self._preempted_requests.pop(0)
-
+            # For preempted requests, prefill should be finished.
+            assert request.id in self._allocation_map
+            # So just checking if one more block is available.
+            # If yes, allocate request, which can result in one more block allocated or not.
             while not self._can_allocate_request(request):
                 # Free up space for the selected one if possible.
                 if self._preempted_requests:
@@ -132,14 +150,61 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
                     request.restart()
                     self.free(request.id)
                     self._request_queue.appendleft(request)
+                    # print(f"Out of loop inner two cos no more preempted_requests and free itself.")
                     break
+                # Here it also adds to request queue, in a way keeping arrival order.
+                # preempted_requests is in order of arrival after sort.
+                # then popping eariler one should append to left.
             else:
+                # Only executed when while condition becomes false.
+                # When break/exception, not executed.
+                # print(f"Out of loop inner two cos can_allocate_request.")
                 self._allocate_request(request)
                 next_num_tokens = self._get_request_next_num_tokens(request)
                 requests.append(request)
                 num_tokens.append(next_num_tokens)
 
         if not requests:
+            # print("No requests to schedule.")
             return
 
         return Batch(self._replica_id, requests, num_tokens)
+
+# TODO: Write a dry run function to get the batch size and the requests in the batch.
+# TODO: Keep a shadow copy of all states involved, or in some way that can restore without copying.
+# TODO: Get job list, and lookup kvcontroller, if hit in memory if just next job || this job, launch fetch and read channel
+# for these two jobs, remove the hack in on_schedule.
+# if hit in disk, launch a fetch to memory first.
+# General idea is to deal with the preload/prefetch/preeviction problem completely in replica scheduler.
+# Then in relica stage scheduler, should see a state that ALL KV cache asserted to be in GPU memory, but with some timestamps to 
+# get available. Note that when num_layer is > 1, end_xx - end_fir_xx / (num_layers - 1) is the per_layer_time.
+# Assuming all read continous, just async writes can be layer by layer.
+# Then in replica stage scheduler, assert those in GPU, and simulate the loading ready layer timepoint of every block.
+# And choose max layer by layer.
+# Then call exec based on that.
+
+# 0. Make use of sys buf in CPU memory, read to it should use shadow buffer.
+# 1. dry run here.
+# 2. Prefetch window functions.
+# 3. Preevict window functions.
+# 4. Modify replica stage scheduler to assert and calculate.
+
+# A core problem is to make space in async way without communication events so that we can mark status in two steps.
+# Now need to avoid the async make space part get used too early before it is completely evicted.
+# Just keep sys buf always available when on schedule.
+
+'''
+How is _request_queue filled, is it simply in time order??!!  
+Prefer those in request queue first, how does this change?
+How is _preempted_requests managed.  
+
+add_request adds to _request_queue
+_alloaction_map, allocate and free.  
+
+
+request arrival will add request to global scheduler, which adds request to replica scheduler.  
+global scheduler always sort requests by arriving time then add request to replica scheduler.  
+So _request_queue in replica scheduler is in time order.  
+
+It CAN actually see what are possible to get scheduled next, just do a dry run, with 
+'''

@@ -38,15 +38,17 @@ class Batch(BaseEntity):
 
         self._requests = requests
         self._num_tokens = num_tokens
-        self._total_num_tokens = sum(num_tokens)
+        self._total_num_tokens = sum(num_tokens) # NOTE: Also hack this when changing num_tokens.
         self._num_prefill_tokens = sum(
             [
                 (t if not r.is_prefill_complete else 0)
                 for r, t in zip(self.requests, self._num_tokens)
             ]
-        )
+        ) # NOTE: Also hack this when changing num_tokens and requests.
 
+        # How many tokens to compute in the batch, rounded to the nearest multiple of 8.
         self._total_num_tokens_rounded = (self._total_num_tokens + 7) // 8 * 8
+        # NOTE: Also hack this when changing num_tokens.
 
         self._scheduled_at = None
         self._completed_at = None
@@ -111,6 +113,15 @@ class Batch(BaseEntity):
     def all_requests_completed(self) -> bool:
         return all([request.completed for request in self._requests])
     
+    def reset_on_request_and_num_tokens_change(self):
+        self._total_num_tokens = sum(self._num_tokens)
+        self._num_prefill_tokens = sum(
+            [
+                (t if not r.is_prefill_complete else 0)
+                for r, t in zip(self.requests, self._num_tokens)
+            ]
+        )
+        self._total_num_tokens_rounded = (self._total_num_tokens + 7) // 8 * 8
     
     def set_restore_between_stages(self, kv_hit_length_list, num_processed_tokens_list, 
                                    should_reset_prefill_complete_list, 
@@ -120,6 +131,7 @@ class Batch(BaseEntity):
         self._should_reset_prefill_complete_list = should_reset_prefill_complete_list
         self._batch_num_tokens_list = batch_num_tokens_list
         self._new_full_blocks_list = new_full_blocks_list
+        self.reset_on_request_and_num_tokens_change()
         
     def reset_restore_between_stages(self) -> None:
         # Only called on cache enabled && not the last stage.
@@ -133,6 +145,7 @@ class Batch(BaseEntity):
             bidx += 1
         # Do not reset other states for full blocks.
         self._new_full_blocks_list = None
+        self.reset_on_request_and_num_tokens_change()
 
 
     def on_schedule(

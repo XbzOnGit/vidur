@@ -786,6 +786,8 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
         return self._predictions["attn_post_proj"][(batch._total_num_tokens_rounded,)]
 
     def _get_mlp_layer_up_proj_execution_time(self, batch: Batch) -> float:
+        # print(f"batch._total_num_tokens_rounded: {batch._total_num_tokens_rounded}")
+        # print(f"batch_tokens: {batch.num_tokens}")
         return self._predictions["mlp_up_proj"][(batch._total_num_tokens_rounded,)]
 
     def _get_mlp_layer_down_proj_execution_time(self, batch: Batch) -> float:

@@ -339,6 +339,7 @@ class Request(BaseEntity):
         execution_time: float,
         model_execution_time: float,
     ) -> None:
+        # print(f"Request {self._id} adds {execution_time}")
         self._execution_time += execution_time
         self._model_execution_time += model_execution_time
         self._latest_stage_completed_at = time

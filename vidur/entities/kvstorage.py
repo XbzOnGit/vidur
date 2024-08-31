@@ -249,15 +249,27 @@ class KVStorageController(BaseEntity):
                 # We know it must be NOT in GPU memory, so make space.
                 # no write because should always be present in 1.
                 # print("4")
-                self._kv_block_trie.synced_acquire_space(0, number_of_blocks_to_preload, 
-                                                      timestamp, True, True)
+                read_buffer_blocks = self._kv_block_trie.read_buffer_blocks(0)
+                make_spape_rbuf_end_time = timestamp
+                make_space_rbuf_firlayer_time = timestamp
+                make_space_rbuf_per_layer_time = 0.0
+                async_preload_number = number_of_blocks_to_preload
+                if number_of_blocks_to_preload > read_buffer_blocks:
+                    synced_block_num = number_of_blocks_to_preload - read_buffer_blocks
+                    make_spape_rbuf_end_time, make_space_rbuf_firlayer_time, \
+                    make_space_rbuf_per_layer_time = self._kv_block_trie.synced_acquire_space(0, synced_block_num, 
+                                                                                              timestamp, False, False)
+                    async_preload_number = read_buffer_blocks
+                    
+                self._kv_block_trie.synced_acquire_space(0, async_preload_number, 
+                                                make_spape_rbuf_end_time, True, True)
                 # This is loading into 0, so use that buffer.
                 # Should be the time max(read_channel.last_time_in_use, request scheduled time, space contention time)
                 # FIXME: Modify scheduler to mark a scheduled time in advance in job queues.
                 # FIXME: It is better to launch preload there.
                 # FIXME: If preload is launched there, time_to_start_fetch is not important and should be skipped.
                 # FIXME: Use another timestamp, attached in scheduler.
-                time_to_start_fetch = max(read_channel.last_time_in_use, batch_to_hack.scheduled_at)
+                time_to_start_fetch = max(read_channel.last_time_in_use, batch_to_hack.scheduled_at, make_spape_rbuf_end_time)
                 # Note that need enough space at time_to_start_fetch.
             else:
                 # Then fetch at that time.
@@ -305,6 +317,9 @@ class KVStorageController(BaseEntity):
         batch_num_tokens_list = []
         req_bidx = 0
         # Now really change it.
+
+        # Hack && restore ALL related indirect numbers of 
+        # num_processed_tokens and prefill_complete and prefill_complete_time, num_tokens of batch.
         for request in batch_to_hack.requests:
             kv_hit_length_list.append(request.kv_cache_hit_length)
             num_processed_tokens_list.append(request.num_processed_tokens)
