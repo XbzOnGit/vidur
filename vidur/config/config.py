@@ -327,16 +327,16 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default="",
         metadata={"help": "CPU GPU throughput."},
     )
-    layer_pipeline: str = field(
-        default="TRUE",
+    layer_pipeline: bool = field(
+        default=False,
         metadata={"help": "Layer pipeline."},
     )
-    read_pipeline_buffer: str = field(
-        default="TRUE",
+    read_pipeline_buffer: bool = field(
+        default=False,
         metadata={"help": "Read pipeline buffer."},
     )
-    gpu_write_through_cpu: str = field(
-        default="TRUE",
+    gpu_write_through_cpu: bool = field(
+        default=False,
         metadata={"help": "GPU write through CPU."},
     )
     read_buffer_fraction: float = field(

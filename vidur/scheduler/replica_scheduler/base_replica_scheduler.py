@@ -73,7 +73,7 @@ class BaseReplicaScheduler(ABC):
 
         read_pipeline_buffer = False
         if replica_scheduler_config.cache_lookup_type is not None:
-            read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
+            read_pipeline_buffer = replica_scheduler_config.read_pipeline_buffer
         read_buffer_fraction = replica_scheduler_config.read_buffer_fraction
         if not read_pipeline_buffer:
             read_buffer_fraction = 0.0
@@ -85,8 +85,10 @@ class BaseReplicaScheduler(ABC):
         param_size_per_device = memory_planner.get_param_memory_per_device()
         self._replica_kv_controllers = []
         if replica_scheduler_config.cache_lookup_type is not None:
-            layer_pipeline = True if replica_scheduler_config.layer_pipeline.upper() == "TRUE" else False
-            gpu_write_through_cpu = True if replica_scheduler_config.gpu_write_through_cpu.upper() == "TRUE" else False
+            layer_pipeline = replica_scheduler_config.layer_pipeline
+            gpu_write_through_cpu = replica_scheduler_config.gpu_write_through_cpu
+            if read_pipeline_buffer:
+                assert gpu_write_through_cpu, "GPU write through CPU must be enabled when read pipeline buffer is enabled."
             # read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
             controller = KVStorageController(replica_scheduler_config.block_size, layer_pipeline, replica.num_layers // num_stages,
                                              read_pipeline_buffer, gpu_write_through_cpu)
@@ -258,6 +260,7 @@ class BaseReplicaScheduler(ABC):
             batch = self._get_next_batch()
             if not batch:
                 break
+            # Get the batch and do preload into GPU.
             scheduled_batches.append(batch)
             self._num_running_batches += 1
         for batch in scheduled_batches:
