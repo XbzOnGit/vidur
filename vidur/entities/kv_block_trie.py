@@ -87,6 +87,9 @@ class KVBlockTrieNode:
     @property
     def position_in_evict_heap(self):
         return self._position_in_evict_heap
+    @property
+    def storage_layer_info(self):
+        return self._storage_layer_info
     
     @property
     def is_leaf(self):

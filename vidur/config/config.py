@@ -355,6 +355,14 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default="",
         metadata={"help": "Disk CPU throughput."},
     )
+    disk_cpu_prefetch: bool = field(
+        default=False,
+        metadata={"help": "Disk CPU prefetch."},
+    )
+    disk_cpu_preevict: bool = field(
+        default=False,
+        metadata={"help": "Disk CPU preevict."},
+    )
 
 
 
