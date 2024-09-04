@@ -22,10 +22,10 @@ Always restore before the batch gets to be processed, cos for this batch_stage, 
 # All memory, including those in lower memory, are managed in blocks.
 class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
-                 gpu_write_through_cpu: bool, disk_cpu_prefetch_and_preevict: bool):
+                 gpu_write_through_cpu: bool, disk_cpu_prefetch: bool):
         # Now always fetch the longest path.
         self._id = KVStorageController.generate_id()
-        self._kv_block_trie = KVBlockTrie(layer_pipeline, block_size, num_layers_per_node, disk_cpu_prefetch_and_preevict) # Only this storage, and everything on this.
+        self._kv_block_trie = KVBlockTrie(layer_pipeline, block_size, num_layers_per_node, disk_cpu_prefetch) # Only this storage, and everything on this.
         self._block_size = block_size
         self._active_blocks = {} # From reqid to number of active blocks.
         # Note that do not need to record the block here, cos its content can be gotten from request.tokens.
@@ -43,7 +43,7 @@ class KVStorageController(BaseEntity):
         self._num_layers = num_layers_per_node # This is per node(per controller).
         self._read_pipeline_buffer = read_pipeline_buffer
         self._gpu_write_through_cpu = gpu_write_through_cpu
-        self._disk_cpu_prefetch_and_preevict = disk_cpu_prefetch_and_preevict
+        self._disk_cpu_prefetch = disk_cpu_prefetch
         self._storage_layer_cnt = 0
         self._delay_of_waiting_for_prefetch_before_preload = 0.0
         self._wait_for_active_blocks_sync_time = 0.0
@@ -68,6 +68,7 @@ class KVStorageController(BaseEntity):
         self._read_buffer_available.append(0.0)
 
     def dump_stats(self):
+        print()
         print(f"delay_of_waiting_for_prefetch_before_preload: {self._delay_of_waiting_for_prefetch_before_preload}")
         print(f"wait_for_active_blocks_sync_time: {self._wait_for_active_blocks_sync_time}")
         print(f"wait_for_preload_space_synced_due_to_more_than_buf: {self._wait_for_preload_space_synced_due_to_more_than_buf}")
@@ -207,7 +208,7 @@ class KVStorageController(BaseEntity):
         synced_to_mem_end_time = timestamp
         synced_to_mem_fir_time = timestamp
         synced_to_mem_per_layer_time = 0.0
-        if not self._disk_cpu_prefetch_and_preevict:
+        if not self._disk_cpu_prefetch:
             synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.synced_fetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, timestamp)
         # Update timestamp cos it is synced, just as if time is passed there.
         else:

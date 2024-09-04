@@ -494,9 +494,9 @@ class KVBlockTrieNode:
 
 # Model channels outside the trie, this is only information about it.
 class KVBlockTrie:
-    def __init__(self, layer_pipeline: bool, block_size, num_layers: int, disk_cpu_prefetch_and_preevict: bool):
+    def __init__(self, layer_pipeline: bool, block_size, num_layers: int, disk_cpu_prefetch: bool):
         self.root = KVBlockTrieNode(None, tuple(), self, 0)
-        print(f"scheduler-aware cache: {disk_cpu_prefetch_and_preevict}")
+        print(f"scheduler-aware prefetch: {disk_cpu_prefetch}")
         # Configurations
         self._block_size = block_size
         global general_kv_block_size
@@ -540,7 +540,7 @@ class KVBlockTrie:
         
 
         self._layer_pipeline = layer_pipeline
-        self._disk_cpu_prefetch_and_preevict = disk_cpu_prefetch_and_preevict
+        self._disk_cpu_prefetch = disk_cpu_prefetch
 
         atexit.register(self.dump_stats)
 

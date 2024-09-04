@@ -315,10 +315,6 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default="",
         metadata={"help": "Disk size."},
     )
-    disk_prefetch: str = field(
-        default="",
-        metadata={"help": "Disk prefetch."},
-    )
     gpu_cpu_thput: str = field(
         default="",
         metadata={"help": "GPU CPU throughput."},
@@ -355,9 +351,13 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default="",
         metadata={"help": "Disk CPU throughput."},
     )
-    disk_cpu_prefetch_and_preevict: bool = field(
+    disk_cpu_prefetch: bool = field(
         default=False,
-        metadata={"help": "Disk CPU prefetch and pre-evict."},
+        metadata={"help": "Disk CPU prefetch."},
+    )
+    scheduler_aware_eviction: bool = field(
+        default=False,
+        metadata={"help": "Scheduler aware eviction."},
     )
 
 
