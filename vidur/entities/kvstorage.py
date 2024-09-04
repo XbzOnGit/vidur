@@ -22,10 +22,10 @@ Always restore before the batch gets to be processed, cos for this batch_stage, 
 # All memory, including those in lower memory, are managed in blocks.
 class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
-                 gpu_write_through_cpu: bool, disk_cpu_prefetch: bool, disk_cpu_preevict: bool):
+                 gpu_write_through_cpu: bool, disk_cpu_prefetch_and_preevict: bool):
         # Now always fetch the longest path.
         self._id = KVStorageController.generate_id()
-        self._kv_block_trie = KVBlockTrie(layer_pipeline, block_size, num_layers_per_node) # Only this storage, and everything on this.
+        self._kv_block_trie = KVBlockTrie(layer_pipeline, block_size, num_layers_per_node, disk_cpu_prefetch_and_preevict) # Only this storage, and everything on this.
         self._block_size = block_size
         self._active_blocks = {} # From reqid to number of active blocks.
         # Note that do not need to record the block here, cos its content can be gotten from request.tokens.
@@ -43,10 +43,11 @@ class KVStorageController(BaseEntity):
         self._num_layers = num_layers_per_node # This is per node(per controller).
         self._read_pipeline_buffer = read_pipeline_buffer
         self._gpu_write_through_cpu = gpu_write_through_cpu
-        self._disk_cpu_prefetch = disk_cpu_prefetch
-        self._disk_cpu_preevict = disk_cpu_preevict
+        self._disk_cpu_prefetch_and_preevict = disk_cpu_prefetch_and_preevict
         self._storage_layer_cnt = 0
+        self._time_in_advance_to_fetch = 0.0
         self._read_buffer_available = []
+        atexit.register(self.dump_stats)
 
     def set_read_buffer_available(self, layer_no, timepoint):
         assert timepoint >= self._read_buffer_available[layer_no]
@@ -61,8 +62,12 @@ class KVStorageController(BaseEntity):
                                          space_per_token_per_layer)
         self._storage_layer_cnt += 1
         self._read_buffer_available.append(0.0)
+
+    def dump_stats(self):
+        print(f"Time in advance to fetch: {self._time_in_advance_to_fetch}")
     
     def on_batch_stage(self, batch_to_hack: Batch, timestamp) -> Tuple[Tuple[float, float], List[Tuple[int, KVBlockTrieNode]]]:
+        # print(f"\n\nBatch {batch_to_hack.id} starts to be hacked.")
         # Return the timepoint ready to execute and the per layer preload time.
         # Step 1. From num_processed to num_processed + num_tokens
         # Only care about those num_processed tokens % block_size == 0.
@@ -89,7 +94,9 @@ class KVStorageController(BaseEntity):
         new_full_blocks_list: List[Tuple[int, KVBlockTrieNode]] = []
         end_first_layer_of_already_in_gpu = None
         bidx = 0
+        max_arrival_time = max([request.arrived_at for request in batch_to_hack.requests])
         for request in batch_to_hack.requests:
+            # print(f"\nRequest {request.id} starts to be hacked.")
             if request.num_processed_tokens % self._block_size != 0:
                 assert request.id in self._active_blocks
             number_of_tokens_to_lookup = max(request.num_processed_tokens, request.num_prefill_tokens)
@@ -125,6 +132,16 @@ class KVStorageController(BaseEntity):
                         end_first_layer_of_already_in_gpu = complete_firlay_time
                     # This is because the preload of this batch should be together
                     # And preload of last batch should be done before this batch cos it is before execution of last batch.
+                hit.set_do_not_evict(True)
+                if hit.is_in_evict_heap:
+                    # Pin them.
+                    # print(f"Remove {hit.id} from evict of layer {color}, it is leaf: {hit.is_leaf}")
+                    # if len(hit.children) > 0:
+                    #     for child in hit.children.values():
+                    #         print(f"Child {child.id} has color {child.color}")
+                    # else:
+                    #     print("No children.")
+                    hit.remove_from_evict_heap()
             hit_length = len(hit_trace) - 1
             assert request.num_processed_tokens // self._block_size <= hit_length, f"{request.num_processed_tokens} // {self._block_size} > {hit_length}, id is {request.id}"
             # NOTE: It can be one more token, if prefill ends.
@@ -146,6 +163,8 @@ class KVStorageController(BaseEntity):
                     self._kv_block_trie.add_hit(hit_node.color)
             last_virtual_full_block: KVBlockTrieNode = hit_trace[len(hit_trace) - 1]
             last_depth = last_virtual_full_block.depth
+            assert all(hit.refcnt > 0 for hit in hit_trace[1:])
+            # So will not be evicted from disk.
             if current_full_blocks > previous_have_blocks:
                 # Effective computational insert.
                 for i in range(previous_have_blocks, current_full_blocks):
@@ -176,8 +195,13 @@ class KVStorageController(BaseEntity):
         #        self._kv_block_trie.evict_list_try_push_in_reverse_order(hit_trace, lno)
         assert len(preload_list) == len(preload_set)
         assert len(synced_fetch_from_disk_to_memory_list) == len(synced_fetch_from_disk_to_memory_set)
-        timestamp = self.synced_fetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, timestamp)
+        if not self._disk_cpu_prefetch_and_preevict:
+            timestamp = self.synced_fetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, timestamp)
         # Update timestamp cos it is synced, just as if time is passed there.
+        else:
+            # print(f"max arrival time is {max_arrival_time}, while timestamp is {timestamp}")
+            timestamp = self.oracle_prefetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, max_arrival_time, 
+                                                                 timestamp)
 
         # FIXME: Now launch eviction for active blocks together with preload blocks.
         # It can be latter, allowing preload to start earlier.
@@ -225,6 +249,23 @@ class KVStorageController(BaseEntity):
         batch_num_tokens_list = []
         req_bidx = 0
         # Now really change it.
+
+        # Now everything should be in GPU.
+        # And no more eviction in this batch.
+        # Before switching into cache, only the last one in hit trace possible to be evictable.
+        for h_tr in hit_traces:
+            h_len = len(h_tr) - 1
+            for h in h_tr[1:]:
+                assert h.color == 0
+                assert h.do_not_evict
+                h.set_do_not_evict(False)
+            if h_len > 0:
+                last_hit: KVBlockTrieNode = h_tr[h_len]
+                assert not last_hit.is_in_evict_heap
+                last_hit.callback_on_possible_leaf_change()
+                # if last_hit.is_in_evict_heap:
+                #     print(f"Add {last_hit.id} to evict of layer {last_hit.color} after possible leaf change.")
+                
 
         # Hack && restore ALL related indirect numbers of 
         # num_processed_tokens and prefill_complete and prefill_complete_time, num_tokens of batch.
@@ -490,7 +531,7 @@ class KVStorageController(BaseEntity):
         return ready_exec_per_layer, end_time
     
 
-    def synced_fetch_from_disk_to_memory(self, synced_fetch_from_disk_to_memory_list: List[KVBlockTrieNode], timestamp):
+    def synced_fetch_from_disk_to_memory(self, synced_fetch_from_disk_to_memory_list: List[KVBlockTrieNode], timestamp: float):
         number_of_blocks_to_synced_to_memory = len(synced_fetch_from_disk_to_memory_list)
         if number_of_blocks_to_synced_to_memory == 0:
             return timestamp
@@ -514,3 +555,52 @@ class KVStorageController(BaseEntity):
             self._kv_block_trie.add_insert(1)
             node.fetch_to_higher_location(fetch_end_time, fetch_firlayer_time)
         return fetch_end_time
+
+
+    def oracle_prefetch_from_disk_to_memory(self, fetch_list: List[KVBlockTrieNode], max_arrival_time ,timestamp):
+        number_of_blocks_to_fetch = len(fetch_list)
+        if number_of_blocks_to_fetch == 0:
+            return timestamp
+        # Only prefetch the size that fits.
+        read_buf_size = self._kv_block_trie.read_buffer_blocks(1)
+        disk_read_channel: Channel = self._kv_block_trie.get_channel(1)[0]
+        assert number_of_blocks_to_fetch <= read_buf_size
+        # Make read buf BIG enough, larger than KV cache available blocks in GPU.
+        # So according to original scheduler, should be in this range.
+
+
+        # Note that this might not be the best to use max_arrival_time.
+        # buffer av for space constraint.
+        # max_arrival is logical constraint.
+        # last_in_use for channel constraint.
+
+        # To make every batch just fetch once from disk to make it simpler, 
+        # now batch fetch together. But add time differently.
+        wait_for_present_on_disk_end_time = 0.0
+        for node in fetch_list:
+            assert node.color == 2
+            ed_time, ed_fir_time = node.get_ready_time(2)
+            if ed_time > wait_for_present_on_disk_end_time:
+                wait_for_present_on_disk_end_time = ed_time
+        # Wait for present before prefetch.
+        oracle_time_to_start_prefetch = max(max_arrival_time, self._read_buffer_available[1], 
+                                            disk_read_channel.last_time_in_use, wait_for_present_on_disk_end_time)
+        self._time_in_advance_to_fetch += timestamp - oracle_time_to_start_prefetch # timestamp should be bigger if effective.
+        # Launch together, but divide the time.
+        swap_end_time, swap_firlayer_time, swap_per_layer = self._kv_block_trie.synced_acquire_space(1,
+                                                                                number_of_blocks_to_fetch,
+                                                                                oracle_time_to_start_prefetch,
+                                                                                True,
+                                                                                True, True)
+        self._read_buffer_available[1] = swap_end_time
+
+        fetch_end_time, fetch_firlayer_time, per_layer_fetch_time = disk_read_channel.transmit(\
+            number_of_blocks_to_fetch * self._block_size, oracle_time_to_start_prefetch, self._num_layers)
+        final_end_time = max(fetch_end_time, timestamp)
+        self._time_in_advance_to_fetch += timestamp - fetch_end_time # If < 0, even need to wait.
+        # for swapped space to be ready. 
+        for node in fetch_list:
+            assert node.color == 2
+            self._kv_block_trie.add_insert(1)
+            node.fetch_to_higher_location(fetch_end_time, fetch_firlayer_time)
+        return final_end_time

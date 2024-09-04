@@ -46,6 +46,8 @@ class KVBlockTrieNode:
         self.id = kv_trie_node_id
         kv_trie_node_id += 1
 
+        self._do_not_evict = False
+
         self.record_of_evictlist_ops = []
         self.parent = parent
         self.children = {}
@@ -77,6 +79,13 @@ class KVBlockTrieNode:
                 return idx
             idx += 1
         return -1
+
+    @property
+    def do_not_evict(self):
+        return self._do_not_evict
+    
+    def set_do_not_evict(self, value):
+        self._do_not_evict = value
 
     def get_ready_time(self, layer_no: int):
         assert layer_no >= 0
@@ -240,6 +249,8 @@ class KVBlockTrieNode:
                 self.remove_from_evict_heap()
         else:
             if is_leaf:
+                if self.do_not_evict:
+                    return
                 if color == self._kvtrie.num_storage_layers - 1:
                     if self._refcnt == 0:
                         # print(f"{self.id} Add to heap on leaf refcnt == 0.")
@@ -483,8 +494,9 @@ class KVBlockTrieNode:
 
 # Model channels outside the trie, this is only information about it.
 class KVBlockTrie:
-    def __init__(self, layer_pipeline: bool, block_size, num_layers: int):
+    def __init__(self, layer_pipeline: bool, block_size, num_layers: int, disk_cpu_prefetch_and_preevict: bool):
         self.root = KVBlockTrieNode(None, tuple(), self, 0)
+        print(f"scheduler-aware cache: {disk_cpu_prefetch_and_preevict}")
         # Configurations
         self._block_size = block_size
         global general_kv_block_size
@@ -528,6 +540,7 @@ class KVBlockTrie:
         
 
         self._layer_pipeline = layer_pipeline
+        self._disk_cpu_prefetch_and_preevict = disk_cpu_prefetch_and_preevict
 
         atexit.register(self.dump_stats)
 
@@ -663,7 +676,8 @@ class KVBlockTrie:
 
     # block_number free blocks.
     # Also mark the space as used in this function.
-    def synced_acquire_space(self, layer_no, block_number: int, timestamp, no_write: bool, use_buf: bool) -> Tuple[float, float, float]:
+    def synced_acquire_space(self, layer_no, block_number: int, timestamp, no_synced_write: bool, use_buf: bool, 
+                             allow_lower_write:bool = False) -> Tuple[float, float, float]:
         availble_blocks_without_buffer = self.available_blocks(layer_no)
         # print(f"Layer {layer_no} available blocks: {availble_blocks_without_buffer}")
         # print(f"Layer {layer_no} acquires {block_number} blocks.")
@@ -681,7 +695,7 @@ class KVBlockTrie:
             should_make_space = block_number - availble_blocks_without_buffer
             synced_evict_make_space = should_make_space
             if use_buf:
-                assert no_write, f"{layer_no} {block_number} {timestamp} {no_write} {use_buf}"
+                assert no_synced_write, f"{layer_no} {block_number} {timestamp} {no_synced_write} {use_buf}"
                 # A seperate call to make use of read buffer.
                 # This buffer is used for loading into layer_no.
                 read_buffer_blocks = self.read_buffer_blocks(layer_no)
@@ -696,14 +710,17 @@ class KVBlockTrie:
                 # FIXME: Assume that write through is used, so evict time to get back read buffer is 0.
                 # The purpose here is to mark the space as free, so that read buffer is back.
                 # Also swap the space for read buffer.
-                evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_write)
-                assert evict_per == 0
-                assert evict_end == timestamp
-                assert evict_fir == timestamp
+                if not allow_lower_write:
+                    evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_synced_write)
+                    assert evict_per == 0
+                    assert evict_end == timestamp
+                    assert evict_fir == timestamp
+                else:
+                    evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, False)
                 assert self._used_blocks[layer_no] <= self._num_threshold_blocks[layer_no]
                 return evict_end, evict_fir, evict_per
             else:
-                evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_write)
+                evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_synced_write)
                 self._used_blocks[layer_no] += block_number
                 assert self._used_blocks[layer_no] <= self._num_threshold_blocks[layer_no]
                 if not self._used_blocks[layer_no] <= self._num_blocks[layer_no]:
