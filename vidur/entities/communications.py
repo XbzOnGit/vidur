@@ -31,7 +31,11 @@ class Channel(BaseEntity):
             first_layer_time = original_last_time_in_use + per_layer_time
             #print(f"returns 2: {self._last_time_in_use}, {first_layer_time}, {per_layer_time}")
             return self._last_time_in_use, first_layer_time, per_layer_time
-    
+    def get_per_layer_time(self, token_number):
+        per_layer_size = token_number * self._space_per_token_per_layer
+        per_layer_time = per_layer_size / self._thput
+        return per_layer_time
+
     @property
     def last_time_in_use(self):
         return self._last_time_in_use

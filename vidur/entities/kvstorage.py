@@ -45,7 +45,11 @@ class KVStorageController(BaseEntity):
         self._gpu_write_through_cpu = gpu_write_through_cpu
         self._disk_cpu_prefetch_and_preevict = disk_cpu_prefetch_and_preevict
         self._storage_layer_cnt = 0
-        self._time_in_advance_to_fetch = 0.0
+        self._delay_of_waiting_for_prefetch_before_preload = 0.0
+        self._wait_for_active_blocks_sync_time = 0.0
+        self._wait_for_preload_space_synced_due_to_more_than_buf = 0.0
+        self._time_saved_due_to_overlap_prefetch_and_preload = 0.0
+        self._preload_start_before_schedule_time = 0.0
         self._read_buffer_available = []
         atexit.register(self.dump_stats)
 
@@ -64,7 +68,12 @@ class KVStorageController(BaseEntity):
         self._read_buffer_available.append(0.0)
 
     def dump_stats(self):
-        print(f"Time in advance to fetch: {self._time_in_advance_to_fetch}")
+        print(f"delay_of_waiting_for_prefetch_before_preload: {self._delay_of_waiting_for_prefetch_before_preload}")
+        print(f"wait_for_active_blocks_sync_time: {self._wait_for_active_blocks_sync_time}")
+        print(f"wait_for_preload_space_synced_due_to_more_than_buf: {self._wait_for_preload_space_synced_due_to_more_than_buf}")
+        print(f"time_saved_due_to_overlap_prefetch_and_preload: {self._time_saved_due_to_overlap_prefetch_and_preload}")
+        print(f"preload_start_before_schedule_time: {self._preload_start_before_schedule_time}")
+        print("\n")
     
     def on_batch_stage(self, batch_to_hack: Batch, timestamp) -> Tuple[Tuple[float, float], List[Tuple[int, KVBlockTrieNode]]]:
         # print(f"\n\nBatch {batch_to_hack.id} starts to be hacked.")
@@ -83,7 +92,7 @@ class KVStorageController(BaseEntity):
 
 
         # TODO: Add support for disk, now it's not the same with CachedAttention.
-
+        # print(f"On batch_stage timestamp: {timestamp}")
         hit_traces = []
         preload_set: Set[KVBlockTrieNode] = set()
         synced_fetch_from_disk_to_memory_set: Set[KVBlockTrieNode] = set()
@@ -195,12 +204,15 @@ class KVStorageController(BaseEntity):
         #        self._kv_block_trie.evict_list_try_push_in_reverse_order(hit_trace, lno)
         assert len(preload_list) == len(preload_set)
         assert len(synced_fetch_from_disk_to_memory_list) == len(synced_fetch_from_disk_to_memory_set)
+        synced_to_mem_end_time = timestamp
+        synced_to_mem_fir_time = timestamp
+        synced_to_mem_per_layer_time = 0.0
         if not self._disk_cpu_prefetch_and_preevict:
-            timestamp = self.synced_fetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, timestamp)
+            synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.synced_fetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, timestamp)
         # Update timestamp cos it is synced, just as if time is passed there.
         else:
             # print(f"max arrival time is {max_arrival_time}, while timestamp is {timestamp}")
-            timestamp = self.oracle_prefetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, max_arrival_time, 
+            synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.oracle_prefetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, max_arrival_time, 
                                                                  timestamp)
 
         # FIXME: Now launch eviction for active blocks together with preload blocks.
@@ -219,6 +231,9 @@ class KVStorageController(BaseEntity):
         # print(avb)
         # print(number_of_blocks_to_active_diff)
         # print(f"Used block: {self._kv_block_trie._used_blocks[0]}")
+        msend = timestamp
+        msfir = timestamp
+        msper = 0.0
         if self._kv_block_trie.available_blocks(0) < number_of_blocks_to_active_diff:
             # print("Called")
             # Wait for it.
@@ -228,9 +243,12 @@ class KVStorageController(BaseEntity):
             msend, msfir, msper = self._kv_block_trie.synced_acquire_space(0, number_of_blocks_to_active_diff, timestamp, False, 
                                                                         False)
             # print(f"{original_blocks} -> {self._kv_block_trie.available_blocks(0)}")
-            timestamp = msend
+            assert msend >= timestamp
+            # FIXME: Should I pipeline this??!!
+            self._wait_for_active_blocks_sync_time += msend - timestamp
         else:
             # print("3")
+            # Async way.
             msend, mkfir, msper = self._kv_block_trie.synced_acquire_space(0, number_of_blocks_to_active_diff, timestamp, True, False)
             assert msper == 0.0
             assert msend == mkfir
@@ -238,8 +256,9 @@ class KVStorageController(BaseEntity):
         
         # print("\n\n")
         # Space and time for active blocks.
-
-        ready_exec_per_layer, end_time = self.preload_into_GPU(batch_to_hack, preload_list, timestamp)
+        ready_exec_per_layer, end_time = self.preload_into_GPU(batch_to_hack, preload_list, timestamp, 
+                                                               synced_to_mem_end_time, synced_to_mem_fir_time,
+                                                               synced_to_mem_per_layer_time, msend, msfir, msper)
             
         # Have to wait for the whole batch to fetch, so set the batch fetch time on the node.
         # Now hack the batch and store the restore information.
@@ -257,7 +276,8 @@ class KVStorageController(BaseEntity):
             h_len = len(h_tr) - 1
             for h in h_tr[1:]:
                 assert h.color == 0
-                assert h.do_not_evict
+                # Note that there can be the same block in different hit traces.
+                # So do not assert do_not_evict here.
                 h.set_do_not_evict(False)
             if h_len > 0:
                 last_hit: KVBlockTrieNode = h_tr[h_len]
@@ -446,79 +466,145 @@ class KVStorageController(BaseEntity):
                 self._kv_block_trie.add_insert(1)
                 the_node.push_to_lower_location(end_time, end_firlayer_time)
 
-
+    '''
     # NOTE: If no hit on CPU at all, but very big cache size(like big_swap)
     # (layer_pipeline, read_pipeline_buffer, gpu_write_through_cpu):
     # No CPU memory can be the same with (False, False, True).
     # (True, True, True) in this case can give a close but different number??!! WHY??!!
     # (False, False, False) can be slower, cos sometimes it triggers synced evict from GPU to CPU.
-    def preload_into_GPU(self, batch: Batch, preload_list: List[KVBlockTrieNode], timestamp):
+    '''
+    # Return (ready_exec_first_layer, per_layer_preload_time), end_time
+    def preload_into_GPU(self, batch: Batch, preload_list: List[KVBlockTrieNode], timestamp, synced_to_mem_end_time, 
+                         synced_to_mem_fir_time, synced_to_mem_per_layer_time, msend, msfir, msper):
         # max(max_arrival_time, last_channel_in_use, read_buffer_available).
         read_channel = self._kv_block_trie.get_channel(0)[0]
         last_channel_in_use_time = read_channel.last_time_in_use
         assert timestamp >= last_channel_in_use_time
         # Last execution must end after the last load to GPU.
+        # Then this on schedule can be called.
         read_buffer_available = self._read_buffer_available[0]
         max_arrival_time = max([req.arrived_at for req in batch.requests])
-        time_to_preload_start = max(max_arrival_time, last_channel_in_use_time, read_buffer_available)
+        time_to_preload_start_lower_bound = max(max_arrival_time, last_channel_in_use_time, read_buffer_available)
+        # print(f"max_arrival_time: {max_arrival_time}, last_channel_in_use: {last_channel_in_use_time}, read_buf_available: {read_buffer_available}")
         # print(f"Preload start time: {time_to_preload_start}")
         # Guarantee that read buffer is available.
         # Now make space.
         number_of_blocks_to_preload = len(preload_list)
         if number_of_blocks_to_preload == 0:
+            # Note that this means synced from disk to mem must also be 0.
+            assert synced_to_mem_end_time == timestamp
+            assert synced_to_mem_fir_time == timestamp
+            assert synced_to_mem_per_layer_time == 0.0
+            # Just wait for active blocks.
+            if msend > timestamp:
+                # FIXME: Currently this is not pipelined.
+                # But it can be.
+                # print(f"Wait for active blocks time: {msend - timestamp}")
+                return (msend, 0.0), msend
             return (timestamp, 0.0), timestamp
         
         # Check if any node here hit on CPU is not present, just prefetched from disk.
         # If so, need to wait for some time.
-        wait_for_cpu_end_time = timestamp
-        for node in preload_list:
-            assert node.color == 1
-            ed_time, ed_fir_time = node.get_ready_time(1)
-            if ed_time > wait_for_cpu_end_time:
-                wait_for_cpu_end_time = ed_time
-        time_to_preload_start = max(time_to_preload_start, wait_for_cpu_end_time)
+        # Wait for present on CPU is done by synced_mem_end_time.
+        
+        synced_to_mem_start = synced_to_mem_fir_time - synced_to_mem_per_layer_time
 
         # Still need to make space for the final timepoint to prefetch.
+        '''
+        NOTE:
+        Before batch_stage is called, prefetch is launched.
+        The sceond batch_stage is called, start to make space for active blocks and rbuffer.
+        Calculate when to preload by considering when blocks are synced into memory.
+        time_to_preload_start + per_layer_preload_time * (K-1) should be >= synced_to_mem_start + synced_to_mem_per_layer_time * K.
+        for K from 1 to num_layers.
+        time_to_preload_start >= synced_to_mem_start + synced_to_mem_per_layer_time * K - per_layer_preload_time * (K - 1).
+        = synced_to_mem_start + K * (synced_to_mem_per_layer_time - per_layer_preload_time) + per_layer_preload_time.
+        '''
+        time_to_preload_start = None
+        per_layer_preload_time = read_channel.get_per_layer_time(number_of_blocks_to_preload * self._block_size)
+        constraint_due_to_into_cpu_pipelined = None
+        if per_layer_preload_time <= synced_to_mem_per_layer_time:
+            # Do not assert this, it can be not true when preload blocks is more than synced into memory.
+            # assert per_layer_preload_time <= synced_to_mem_per_layer_time, f"{per_layer_preload_time} > {synced_to_mem_per_layer_time}"
+            constraint_due_to_into_cpu_pipelined = synced_to_mem_start + \
+                    self.num_layers * (synced_to_mem_per_layer_time - per_layer_preload_time) + per_layer_preload_time
+        else:
+            constraint_due_to_into_cpu_pipelined = synced_to_mem_start + synced_to_mem_per_layer_time
+        # Then synced_to_mem_start + K * (synced_to_mem_per_layer_time - per_layer_preload_time) + per_layer_preload_time.
+        # increase with K, the strongest constraint is on K = num_layers.
+        # or on K = 1.
         if self._layer_pipeline:
             if self._read_pipeline_buffer:
                 assert self._gpu_write_through_cpu
                 read_buffer_blocks = self._kv_block_trie.read_buffer_blocks(0)
-                make_spape_rbuf_end_time = timestamp
+                make_space_rbuf_end_time = timestamp
                 make_space_rbuf_firlayer_time = timestamp
                 make_space_rbuf_per_layer_time = 0.0
                 async_preload_number = number_of_blocks_to_preload
                 if number_of_blocks_to_preload > read_buffer_blocks:
                     synced_block_num = number_of_blocks_to_preload - read_buffer_blocks
-                    make_spape_rbuf_end_time, make_space_rbuf_firlayer_time, \
+                    make_space_rbuf_end_time, make_space_rbuf_firlayer_time, \
                     make_space_rbuf_per_layer_time = self._kv_block_trie.synced_acquire_space(0, synced_block_num, 
                                                                                             timestamp, False, False)
                     async_preload_number = read_buffer_blocks
+                    self._wait_for_preload_space_synced_due_to_more_than_buf += make_space_rbuf_end_time - timestamp
                 
                 swap_end_time, swap_firlayer_time, swap_per_layer_time = \
                 self._kv_block_trie.synced_acquire_space(0, async_preload_number, 
-                                                         make_spape_rbuf_end_time, True, True)
+                                                         make_space_rbuf_end_time, True, True)
+                assert make_space_rbuf_end_time >= timestamp
+                # TODO: Here it FORCES make_space_rbuf_end_time to be after timestamp.
                 self.set_read_buffer_available(0, swap_end_time)
                 # Only wait until synced space is acquired.
                 # swap_end is marked, but do not wait here.
-                time_to_preload_start = max(time_to_preload_start, make_spape_rbuf_end_time)
+                # Max of CPU present in a pipelined way, preload buf ready.
+                # FIXME: Now wait for synced preload space to be completely ready.
+                if number_of_blocks_to_preload > read_buffer_blocks:
+                    time_to_preload_start = max(make_space_rbuf_end_time, constraint_due_to_into_cpu_pipelined, time_to_preload_start_lower_bound)
+                else:
+                    # No synced make space.
+                    # Just when CPU is ready, and lower bound ready.
+                    time_to_preload_start = max(constraint_due_to_into_cpu_pipelined, time_to_preload_start_lower_bound)
+                # print(f"make_space_rbuf_end_time: {make_space_rbuf_end_time}")
+                # print(f"constraint_due_to_into_cpu_pipelined: {constraint_due_to_into_cpu_pipelined}")
+                # print(f"time_to_preload_start_lower_bound: {time_to_preload_start_lower_bound}")
+                if_not_overlap = max(make_space_rbuf_end_time, synced_to_mem_end_time)
+                assert if_not_overlap >= time_to_preload_start
+                if_not_end_fir_layer = if_not_overlap + per_layer_preload_time
+                if if_not_end_fir_layer <= timestamp:
+                    assert time_to_preload_start + per_layer_preload_time <= timestamp
+                else:
+                    # Only possible to save time when the first execution starting time is later than call of on_schedule.
+                    start_of_first_exec_after_overlap = max(time_to_preload_start + per_layer_preload_time, timestamp)
+                    start_of_first_exec_if_not_overlap = max(if_not_end_fir_layer, timestamp)
+                    # Because at least after on schedule is called.
+                    assert start_of_first_exec_after_overlap <= start_of_first_exec_if_not_overlap
+                    # print(f"Time saved {start_of_first_exec_if_not_overlap - start_of_first_exec_after_overlap}")
+                    self._time_saved_due_to_overlap_prefetch_and_preload += start_of_first_exec_if_not_overlap - start_of_first_exec_after_overlap
+                # print(f"Time to preload start: {time_to_preload_start}")
+                # print(f"timestamp: {timestamp}")
+                # print(f"Start first exec: {max(time_to_preload_start + per_layer_preload_time, timestamp)}")
             else:
+                # Until space ready && CPU completely in memory.
                 evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(0, 
                                                                                             number_of_blocks_to_preload,
                                                                                             timestamp, False, False)
                 # FIXME: Now just wait until enough space.
-                time_to_preload_start = evict_end_time
+                time_to_preload_start = max(evict_end_time, synced_to_mem_end_time, time_to_preload_start_lower_bound)
         else:
             evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(0,
                                                                                             number_of_blocks_to_preload,
                                                                                             timestamp, False, False)
             # Wait for evict to complete when no pipeline.
-            time_to_preload_start = evict_end_time
+            time_to_preload_start = max(evict_end_time, synced_to_mem_end_time, time_to_preload_start_lower_bound)
         
         # max(max_arrival_time, last_channel_in_use, read_buffer_available, cpu_present_time, synced_make_space_time).
         end_time = time_to_preload_start
         end_firlayer_time = time_to_preload_start
         per_layer_preload_time = 0.0
 
+        self._preload_start_before_schedule_time += timestamp - time_to_preload_start
+        # If > 0, save some time, else even wait for it.
         assert number_of_blocks_to_preload > 0
         end_time, end_firlayer_time, per_layer_preload_time = \
         read_channel.transmit(number_of_blocks_to_preload * self._block_size, 
@@ -534,7 +620,7 @@ class KVStorageController(BaseEntity):
     def synced_fetch_from_disk_to_memory(self, synced_fetch_from_disk_to_memory_list: List[KVBlockTrieNode], timestamp: float):
         number_of_blocks_to_synced_to_memory = len(synced_fetch_from_disk_to_memory_list)
         if number_of_blocks_to_synced_to_memory == 0:
-            return timestamp
+            return timestamp, timestamp, 0.0
         evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(1, 
                                                                                                         number_of_blocks_to_synced_to_memory, 
                                                                                                         timestamp, False, False)
@@ -554,13 +640,13 @@ class KVStorageController(BaseEntity):
             assert node.color == 2
             self._kv_block_trie.add_insert(1)
             node.fetch_to_higher_location(fetch_end_time, fetch_firlayer_time)
-        return fetch_end_time
+        return fetch_end_time, fetch_end_time, 0.0
 
 
     def oracle_prefetch_from_disk_to_memory(self, fetch_list: List[KVBlockTrieNode], max_arrival_time ,timestamp):
         number_of_blocks_to_fetch = len(fetch_list)
         if number_of_blocks_to_fetch == 0:
-            return timestamp
+            return timestamp, timestamp, 0.0
         # Only prefetch the size that fits.
         read_buf_size = self._kv_block_trie.read_buffer_blocks(1)
         disk_read_channel: Channel = self._kv_block_trie.get_channel(1)[0]
@@ -585,7 +671,6 @@ class KVStorageController(BaseEntity):
         # Wait for present before prefetch.
         oracle_time_to_start_prefetch = max(max_arrival_time, self._read_buffer_available[1], 
                                             disk_read_channel.last_time_in_use, wait_for_present_on_disk_end_time)
-        self._time_in_advance_to_fetch += timestamp - oracle_time_to_start_prefetch # timestamp should be bigger if effective.
         # Launch together, but divide the time.
         swap_end_time, swap_firlayer_time, swap_per_layer = self._kv_block_trie.synced_acquire_space(1,
                                                                                 number_of_blocks_to_fetch,
@@ -597,10 +682,11 @@ class KVStorageController(BaseEntity):
         fetch_end_time, fetch_firlayer_time, per_layer_fetch_time = disk_read_channel.transmit(\
             number_of_blocks_to_fetch * self._block_size, oracle_time_to_start_prefetch, self._num_layers)
         final_end_time = max(fetch_end_time, timestamp)
-        self._time_in_advance_to_fetch += timestamp - fetch_end_time # If < 0, even need to wait.
+        self._delay_of_waiting_for_prefetch_before_preload += final_end_time - timestamp
+        # print(f"End of prefetch is {fetch_end_time}")
         # for swapped space to be ready. 
         for node in fetch_list:
             assert node.color == 2
             self._kv_block_trie.add_insert(1)
             node.fetch_to_higher_location(fetch_end_time, fetch_firlayer_time)
-        return final_end_time
+        return fetch_end_time, fetch_firlayer_time, per_layer_fetch_time

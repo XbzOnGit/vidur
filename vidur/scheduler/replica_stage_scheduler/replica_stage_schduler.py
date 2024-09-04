@@ -71,7 +71,10 @@ class ReplicaStageScheduler:
             cpu_make_space_per_layer_time = None
             end_last_cpu_make_space_layer_time = None
             
-            assert timestamp <= start_first_exec_time, f"{timestamp} > {start_first_exec_time}"
+            # assert timestamp <= start_first_exec_time, f"{timestamp} > {start_first_exec_time}"
+            # Can be smaller, if preload in advance into buffer.
+            # if timestamp > start_first_exec_time:
+            #     print(f"NOTE: timestamp > start_first_exec_time: {timestamp} > {start_first_exec_time}")
             async_write_list = []
             if self._kv_cache_controller._gpu_write_through_cpu:
                 # If not, do not write to CPU here.
@@ -82,9 +85,12 @@ class ReplicaStageScheduler:
                 self._kv_cache_controller.make_space_for_CPU(needed_block_number, timestamp)
                 end_last_cpu_make_space_layer_time = timestamp # Get per layer time that CPU memory is available.
                 # Make CPU has this much space to write to, can trigger eviction to disks.
+            # print(f"per_layer_execution_time: {per_layer_execution_time}, load_per_layer_time: {load_per_layer_time}")
+            # print(f"timestamp: {timestamp}, start_first_exec_time: {start_first_exec_time}")
             for _ in range(self._kv_cache_controller.num_layers):
                 start_this_exec_time = max(end_last_exec_time, end_last_preload_time)
                 end_this_exec_time = start_this_exec_time + per_layer_execution_time
+                # print(f"Layer{_}: start_this_exec_time: {start_this_exec_time}, end_last_preload_time: {end_last_preload_time}, end_this_exec_time: {end_this_exec_time}")
                 if end_exec_of_first_layer is None:
                     end_exec_of_first_layer = end_this_exec_time
                 # Launch async write.
@@ -103,6 +109,11 @@ class ReplicaStageScheduler:
                 # Assume that preload is continuous.
                 end_last_preload_time += load_per_layer_time
             end_execution_time = end_last_exec_time
+            # print(f"end_execution_time for {batch.id}: {end_execution_time}")
+            # print(f"preload end time: {start_first_exec_time - load_per_layer_time + load_per_layer_time * self._kv_cache_controller.num_layers}")
+            # print(f"preload constraint end: {start_first_exec_time - load_per_layer_time + load_per_layer_time * self._kv_cache_controller.num_layers + per_layer_execution_time}")
+            # print(f"exec constraint end: {start_first_exec_time + per_layer_execution_time * self._kv_cache_controller.num_layers}\n\n")
+            # print(f"On batch {batch.id}, on_schedule: {timestamp}, per_layer_execution_time: {per_layer_execution_time}, per_layer_load_time: {load_per_layer_time}\n\n")
             if len(new_full_blocks_list) > 0:
                 self._kv_cache_controller.switch_active_fullblocks_into_cache(new_full_blocks_list, 
                                                                         end_execution_time, end_exec_of_first_layer)
