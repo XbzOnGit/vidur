@@ -80,7 +80,7 @@ class ReplicaStageScheduler:
             expected_real_insert_cnt = 0
             if self._kv_cache_controller._gpu_write_through_cpu:
                 # If not, do not write to CPU here.
-                # FIXME: Does this naturally pin the blocks??!!
+                # NOTE: If already in trie, pinned by set_do_not_evict, if not, not possible to get evicted.
                 # self._kv_cache_controller._kv_block_trie.check_size_consistency()
                 new_list = self._kv_cache_controller.filter_write_to_CPU_and_preaccess(new_full_blocks_list, timestamp)
                 needed_block_number = len(new_list)

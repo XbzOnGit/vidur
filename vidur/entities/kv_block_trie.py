@@ -772,7 +772,6 @@ class KVBlockTrie:
         else:
             # Need to evict.
             should_make_space = block_number - availble_blocks_without_buffer
-            synced_evict_make_space = should_make_space
             if use_buf:
                 assert no_synced_write, f"{layer_no} {block_number} {timestamp} {no_synced_write} {use_buf}"
                 # A seperate call to make use of read buffer.
@@ -791,6 +790,9 @@ class KVBlockTrie:
                 # FIXME: Assume that write through is used, so evict time to get back read buffer is 0.
                 # The purpose here is to mark the space as free, so that read buffer is back.
                 # Also swap the space for read buffer.
+
+                # FIXME: Does this guarantee those loaded in here not evicted immediately?
+                self._used_blocks[layer_no] += block_number
                 if not allow_lower_write:
                     evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_synced_write)
                     assert evict_per == 0
@@ -799,9 +801,6 @@ class KVBlockTrie:
                 else:
                     evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, False)
                 assert self._used_blocks[layer_no] <= self._num_threshold_blocks[layer_no]
-                # Now when calling _evict_blocks, is in consistent state.
-                # Now assuming read_buf < 50%
-                self._used_blocks[layer_no] += block_number
                 # self._get_size(layer_no)
                 return evict_end, evict_fir, evict_per
             else:

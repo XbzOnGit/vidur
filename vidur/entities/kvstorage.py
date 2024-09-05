@@ -145,7 +145,6 @@ class KVStorageController(BaseEntity):
                         end_first_layer_of_already_in_gpu = complete_firlay_time
                     # This is because the preload of this batch should be together
                     # And preload of last batch should be done before this batch cos it is before execution of last batch.
-                '''
                 hit.set_do_not_evict(True)
                 if hit.is_in_evict_heap:
                     # Pin them.
@@ -157,10 +156,10 @@ class KVStorageController(BaseEntity):
                     #     print("No children.")
                     # print(f"Remove {hit.id} from evict of layer {color}, due to hit.")
                     hit.remove_from_evict_heap()
-                '''
             hit_length = len(hit_trace) - 1
             # print(f"Request {request.id} has hit length: {hit_length}\n\n")
             assert request.num_processed_tokens // self._block_size <= hit_length, f"{request.num_processed_tokens} // {self._block_size} > {hit_length}, id is {request.id}"
+            # So for decoding phase, it remains the same with vidur.
             # NOTE: It can be one more token, if prefill ends.
             curent_tokens_after_this = request.num_processed_tokens + batch_to_hack.num_tokens[bidx]
             if curent_tokens_after_this == request.num_prefill_tokens:
@@ -284,7 +283,6 @@ class KVStorageController(BaseEntity):
         # Now everything should be in GPU.
         # And no more eviction in this batch.
         # Before switching into cache, only the last one in hit trace possible to be evictable.
-        '''
         for h_tr in hit_traces:
             h_len = len(h_tr) - 1
             for h in h_tr[1:]:
@@ -299,7 +297,6 @@ class KVStorageController(BaseEntity):
                 # if last_hit.is_in_evict_heap:
                 #     print(f"Add {last_hit.id} to evict of layer {last_hit.color} after possible leaf change.")
                 
-        '''
         # Hack && restore ALL related indirect numbers of 
         # num_processed_tokens and prefill_complete and prefill_complete_time, num_tokens of batch.
         for request in batch_to_hack.requests:
