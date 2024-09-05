@@ -68,6 +68,7 @@ class BaseReplicaScheduler(ABC):
         print(f"cache_evict_op: {replica_scheduler_config.cache_evict_op}")
         print(f"space per token on one stage: {(2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages}")
         space_per_token = (2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages
+        # per stage.
         space_per_token_per_layer = space_per_token // replica.num_layers
         space_per_block = replica_scheduler_config.block_size * space_per_token
 
@@ -88,17 +89,18 @@ class BaseReplicaScheduler(ABC):
             layer_pipeline = replica_scheduler_config.layer_pipeline
             gpu_write_through_cpu = replica_scheduler_config.gpu_write_through_cpu
             disk_cpu_prefetch = replica_scheduler_config.disk_cpu_prefetch
+            scheduler_aware_eviction = replica_scheduler_config.scheduler_aware_eviction
             if read_pipeline_buffer:
                 assert gpu_write_through_cpu, "GPU write through CPU must be enabled when read pipeline buffer is enabled."
             # read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
             controller = KVStorageController(replica_scheduler_config.block_size, layer_pipeline, replica.num_layers // num_stages,
-                                             read_pipeline_buffer, gpu_write_through_cpu, disk_cpu_prefetch)
+                                             read_pipeline_buffer, gpu_write_through_cpu, disk_cpu_prefetch, scheduler_aware_eviction)
             self._replica_kv_controllers.append(controller)
             # Space per token for each stage(each node).
             # Here no per TP, cos considered together.
             available_kv_memory_gpu_per_stage = available_memory_per_stage - param_size_per_device
             num_blocks = int(available_kv_memory_gpu_per_stage // space_per_block)
-            print(f"About {available_kv_memory_gpu_per_stage / space_per_token} tokens can be stored in one stage.\n\n")
+            print(f"About {available_kv_memory_gpu_per_stage / space_per_token} tokens can be stored in one stage's GPU.\n\n")
             assert num_blocks > 0
             read_thput = 0
             write_thput = 0
@@ -136,7 +138,8 @@ class BaseReplicaScheduler(ABC):
                     disk_num_blocks = int(disk_size // space_per_block)
                     assert disk_num_blocks > 0
                     controller.append_layer(disk_num_blocks, 0, 0, replica_scheduler_config.cache_evict_type, 
-                                            "discard", 0, space_per_token_per_layer)
+                                            "discard", disk_num_blocks, space_per_token_per_layer)
+                    # Make read_buffer size 0.
                     
                 
         else:

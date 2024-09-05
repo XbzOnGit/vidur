@@ -316,6 +316,7 @@ class Request(BaseEntity):
         if self._num_processed_tokens == self.total_tokens:
             self._completed_at = time
             self._completed = True
+            # print(f"request {self.id} completed.")
             for kv_controller in self._replica_scheduler.get_all_kv_controllers():
                 # print(f"Request {self._id} completed")
                 if kv_controller is not None:

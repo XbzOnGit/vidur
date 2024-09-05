@@ -46,9 +46,10 @@ class ReplicaStageScheduler:
     def on_schedule(self, timestamp) -> Tuple[Batch, BatchStage, ExecutionTime, float, float, list]:
         if self._is_busy or not self._batch_queue:
             return None, None, None, None, None, None
-
+        # self._kv_cache_controller._kv_block_trie.check_size_consistency()
         self._is_busy = True
         batch = self._batch_queue.pop(0)
+        # print(f"{batch.id} scheduled.")
         # Now just synchoronously fetch and insert.
         # Do fetch, execute, insert here.
         ready_exec_timeinfo = (timestamp, 0.0)
@@ -76,11 +77,14 @@ class ReplicaStageScheduler:
             # if timestamp > start_first_exec_time:
             #     print(f"NOTE: timestamp > start_first_exec_time: {timestamp} > {start_first_exec_time}")
             async_write_list = []
+            expected_real_insert_cnt = 0
             if self._kv_cache_controller._gpu_write_through_cpu:
                 # If not, do not write to CPU here.
                 # FIXME: Does this naturally pin the blocks??!!
+                # self._kv_cache_controller._kv_block_trie.check_size_consistency()
                 new_list = self._kv_cache_controller.filter_write_to_CPU_and_preaccess(new_full_blocks_list, timestamp)
                 needed_block_number = len(new_list)
+                expected_real_insert_cnt = needed_block_number
                 end_cpu_make_space_time, end_cpu_make_space_fir_time, cpu_make_space_per_layer_time = \
                 self._kv_cache_controller.make_space_for_CPU(needed_block_number, timestamp)
                 end_last_cpu_make_space_layer_time = timestamp # Get per layer time that CPU memory is available.
@@ -120,9 +124,12 @@ class ReplicaStageScheduler:
                 if self._kv_cache_controller._gpu_write_through_cpu:
                     assert len(async_write_list) == self._kv_cache_controller.num_layers
                     # Set present time in CPU.
-                    self._kv_cache_controller.set_full_block_present_in_after_async_write(new_full_blocks_list, 
+                    real_insert_cnt = self._kv_cache_controller.set_full_block_present_in_after_async_write(new_full_blocks_list, 
                                                                                         async_write_list[-1],
                                                                                         async_write_list[0])
+                    assert real_insert_cnt == expected_real_insert_cnt, f"{real_insert_cnt} != {expected_real_insert_cnt}"
+                    # print(f"real_insert_cnt: {real_insert_cnt}, expected_real_insert_cnt: {expected_real_insert_cnt}")
+            # self._kv_cache_controller._kv_block_trie.check_size_consistency()
         else:
             end_execution_time = start_first_exec_time + execution_time.total_time
             new_full_blocks_list = []
