@@ -224,6 +224,7 @@ class KVBlockTrieNode:
 
     def add_self_to_evict_heap(self):
         # print("Add to evict heap called.\n\n")
+        assert not self.do_not_evict
         assert self.evict_timestamp[0] >= 0, f"{self.evict_timestamp}, id: {self.id}"
         assert self.evict_timestamp[1] < 0
         color = self.color

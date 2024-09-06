@@ -359,6 +359,10 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default=False,
         metadata={"help": "Scheduler aware eviction."},
     )
+    cache_reordering: bool = field(
+        default=False,
+        metadata={"help": "Cache reordering."},
+    )
 
 
 

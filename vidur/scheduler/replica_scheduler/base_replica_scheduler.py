@@ -60,6 +60,8 @@ class BaseReplicaScheduler(ABC):
             * 1024**3
             * (1 - replica.memory_margin_fraction)
         )
+
+        self._cache_reordering = replica_scheduler_config.cache_reordering
         available_memory_per_stage = int(available_memory // num_stages)
         # FIXME: assuming fp16.
         # The second 2 for Key and Value.

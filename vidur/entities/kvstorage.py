@@ -11,6 +11,7 @@ from vidur.logger import init_logger
 
 logger = init_logger(__name__)
 
+call_cnt = 0
 
 '''
 1. Feed a batch stage with batch info into thsi controller.
@@ -110,14 +111,7 @@ class KVStorageController(BaseEntity):
         max_arrival_time = max([request.arrived_at for request in batch_to_hack.requests])
         for request in batch_to_hack.requests:
             # print(f"\nRequest {request.id} starts to be hacked.")
-            if request.num_processed_tokens % self._block_size != 0:
-                assert request.id in self._active_blocks
-            number_of_tokens_to_lookup = max(request.num_processed_tokens, request.num_prefill_tokens)
-            number_of_blocks_to_lookup = number_of_tokens_to_lookup // self._block_size
-            kvblock_list = request.full_kvblocks[:number_of_blocks_to_lookup]
-            # Lru list has been updated in lookup.
-            # Record hit.
-            hit_trace: List[KVBlockTrieNode] = self._kv_block_trie.lookup(kvblock_list, timestamp)
+            hit_trace: List[KVBlockTrieNode] = self.lookup(request, timestamp)
             hit_traces.append(hit_trace)
             # Should forever be enough space on GPU for replica scheduler to guarantee.
             for hit in hit_trace[1:]:
@@ -157,6 +151,8 @@ class KVStorageController(BaseEntity):
                     # print(f"Remove {hit.id} from evict of layer {color}, due to hit.")
                     hit.remove_from_evict_heap()
             hit_length = len(hit_trace) - 1
+            # DEBUG:
+            assert all(not hit.is_in_evict_heap for hit in hit_trace[1:])
             # print(f"Request {request.id} has hit length: {hit_length}\n\n")
             assert request.num_processed_tokens // self._block_size <= hit_length, f"{request.num_processed_tokens} // {self._block_size} > {hit_length}, id is {request.id}"
             # So for decoding phase, it remains the same with vidur.
@@ -209,6 +205,8 @@ class KVStorageController(BaseEntity):
         # for hit_trace in hit_traces:
         #    for lno in range(self._kv_block_trie.num_storage_layers):
         #        self._kv_block_trie.evict_list_try_push_in_reverse_order(hit_trace, lno)
+        # DEBUG:
+        assert all([all(not hit.is_in_evict_heap for hit in hit_trace[1:]) for hit_trace in hit_traces])
         assert len(preload_list) == len(preload_set)
         assert len(synced_fetch_from_disk_to_memory_list) == len(synced_fetch_from_disk_to_memory_set)
         synced_to_mem_end_time = timestamp
@@ -225,7 +223,7 @@ class KVStorageController(BaseEntity):
         # FIXME: Now launch eviction for active blocks together with preload blocks.
         # It can be latter, allowing preload to start earlier.
         
-        
+
         assert number_of_blocks_to_active_diff >= 0
         # print(f"Number of blocks to active diff: {number_of_blocks_to_active_diff}\n\n")
         # Space for active blocks have been made above.
@@ -264,7 +262,7 @@ class KVStorageController(BaseEntity):
             assert msend == timestamp
             self._kv_block_trie.mark_active_block_number(0, number_of_blocks_to_active_diff)
             # self._kv_block_trie.check_size_consistency()
-        
+
         # print("\n\n")
         # Space and time for active blocks.
         ready_exec_per_layer, end_time = self.preload_into_GPU(batch_to_hack, preload_list, timestamp, 
@@ -292,7 +290,8 @@ class KVStorageController(BaseEntity):
                 h.set_do_not_evict(False)
             if h_len > 0:
                 last_hit: KVBlockTrieNode = h_tr[h_len]
-                assert not last_hit.is_in_evict_heap
+                # For the same reason, do not assert here.
+                # assert not last_hit.is_in_evict_heap, f"{last_hit.id} is in evict heap but just hit."
                 last_hit.callback_on_possible_leaf_change()
                 # if last_hit.is_in_evict_heap:
                 #     print(f"Add {last_hit.id} to evict of layer {last_hit.color} after possible leaf change.")
@@ -395,6 +394,8 @@ class KVStorageController(BaseEntity):
                     # extra_node_for_async_write_through = True
                     # self._kv_block_trie.insert_into_gpu_from_active_block_original_in_disk(the_node, 
                     #                                                                        end_time, end_firlayer_time)
+                    # if the_node.id == 5420:
+                    #     print(f"{the_node.id}, Inserting into layer 0 with already in layer 2")
                     self._kv_block_trie.insert_into_gpu_from_active_block_original_in_disk_allow_tft(the_node, 
                                                                                                         end_time, 
                                                                                                         end_firlayer_time)
@@ -480,14 +481,31 @@ class KVStorageController(BaseEntity):
 
     def set_full_block_present_in_after_async_write(self, new_full_blocks_list: List[Tuple[int, KVBlockTrieNode]], 
                                                     end_time, end_firlayer_time):
+        global call_cnt
+        call_cnt += 1
         cnt = 0
+        # if call_cnt >= 182:
+        #     print("BEFORE insert into CPU.")
+        #     for reid, th_node in new_full_blocks_list:
+        #         print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
+        #     print("\n\n")
+        # print(f"New full blocks list: {new_full_blocks_list}")
         for reqid, the_node in new_full_blocks_list:
             assert reqid in self._active_blocks
             assert the_node.color == 0 # Must be present in GPU.
             if not the_node.check_if_color_present(1):
+                # print(f"Real insert into CPU: {the_node.id}")
                 self._kv_block_trie.add_insert(1)
                 the_node.push_to_lower_location(end_time, end_firlayer_time)
                 cnt += 1
+            '''
+            if call_cnt >= 182:
+                print(f"After INSERTING {the_node.id} into CPU.")
+                for reid, th_node in new_full_blocks_list:
+                    print(f"the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
+                print("\n\n")
+            '''
+        # print(f"call_cnt: {call_cnt}")
         return cnt
 
     '''
@@ -723,3 +741,14 @@ class KVStorageController(BaseEntity):
             node.fetch_to_higher_location(fetch_end_time, fetch_firlayer_time)
         # self._kv_block_trie.check_size_consistency()
         return fetch_end_time, fetch_firlayer_time, per_layer_fetch_time
+    
+    def lookup(self, request, timestamp):
+        if request.num_processed_tokens % self._block_size != 0:
+            assert request.id in self._active_blocks
+        number_of_tokens_to_lookup = max(request.num_processed_tokens, request.num_prefill_tokens)
+        number_of_blocks_to_lookup = number_of_tokens_to_lookup // self._block_size
+        kvblock_list = request.full_kvblocks[:number_of_blocks_to_lookup]
+        # Lru list has been updated in lookup.
+        # Record hit.
+        hit_trace: List[KVBlockTrieNode] = self._kv_block_trie.lookup(kvblock_list, timestamp)
+        return hit_trace

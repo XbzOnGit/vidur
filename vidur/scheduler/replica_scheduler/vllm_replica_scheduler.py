@@ -1,6 +1,6 @@
 from math import ceil
 from typing import List
-
+from collections import deque
 from vidur.entities.batch import Batch, Request
 from vidur.scheduler.replica_scheduler.base_replica_scheduler import (
     BaseReplicaScheduler,
@@ -75,10 +75,30 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
         # Can have one more block for non-prefill ones.
         self.allocate(request.id, 1)
 
+    def cache_reorder(self):
+        for request in self._request_queue:
+            # FIXME: Now take the first as flag.
+            hit_trace = self.get_kv_controller(0).lookup(request, -1.0)
+            hit_length = len(hit_trace) - 1
+            cached_block_number = hit_length 
+            cached_token_number = max(request.num_processed_tokens, cached_block_number * self._config.block_size)
+            curent_tokens_after_this = request.num_processed_tokens + self._get_request_next_num_tokens(request)
+            if curent_tokens_after_this == request.num_prefill_tokens:
+                curent_tokens_after_this += 1
+            compute_length = curent_tokens_after_this - request.num_processed_tokens
+            assert compute_length > 0
+            order_priority = cached_token_number / compute_length
+            request.order_priority = order_priority
+        # Sort the request queue by order_priority.
+        # 0 has the highest priority.
+        self._request_queue = deque(sorted(self._request_queue, key=lambda x: x.order_priority, reverse=True))
+
     def _get_next_batch(self) -> Batch:
         requests = []
         num_tokens = []
         num_batch_tokens = 0
+        if self._cache_reordering:
+            self.cache_reorder()
         # _request_queue is in order of arrival.
         while self._request_queue:
             request = self._request_queue[0]
@@ -169,42 +189,3 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             return
 
         return Batch(self._replica_id, requests, num_tokens)
-
-# TODO: Write a dry run function to get the batch size and the requests in the batch.
-# TODO: Keep a shadow copy of all states involved, or in some way that can restore without copying.
-# TODO: Get job list, and lookup kvcontroller, if hit in memory if just next job || this job, launch fetch and read channel
-# for these two jobs, remove the hack in on_schedule.
-# if hit in disk, launch a fetch to memory first.
-# General idea is to deal with the preload/prefetch/preeviction problem completely in replica scheduler.
-# Then in relica stage scheduler, should see a state that ALL KV cache asserted to be in GPU memory, but with some timestamps to 
-# get available. Note that when num_layer is > 1, end_xx - end_fir_xx / (num_layers - 1) is the per_layer_time.
-# Assuming all read continous, just async writes can be layer by layer.
-# Then in replica stage scheduler, assert those in GPU, and simulate the loading ready layer timepoint of every block.
-# And choose max layer by layer.
-# Then call exec based on that.
-
-# 0. Make use of sys buf in CPU memory, read to it should use shadow buffer.
-# 1. dry run here.
-# 2. Prefetch window functions.
-# 3. Preevict window functions.
-# 4. Modify replica stage scheduler to assert and calculate.
-
-# A core problem is to make space in async way without communication events so that we can mark status in two steps.
-# Now need to avoid the async make space part get used too early before it is completely evicted.
-# Just keep sys buf always available when on schedule.
-
-'''
-How is _request_queue filled, is it simply in time order??!!  
-Prefer those in request queue first, how does this change?
-How is _preempted_requests managed.  
-
-add_request adds to _request_queue
-_alloaction_map, allocate and free.  
-
-
-request arrival will add request to global scheduler, which adds request to replica scheduler.  
-global scheduler always sort requests by arriving time then add request to replica scheduler.  
-So _request_queue in replica scheduler is in time order.  
-
-It CAN actually see what are possible to get scheduled next, just do a dry run, with 
-'''

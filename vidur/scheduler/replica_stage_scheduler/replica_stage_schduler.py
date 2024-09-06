@@ -77,16 +77,34 @@ class ReplicaStageScheduler:
             # if timestamp > start_first_exec_time:
             #     print(f"NOTE: timestamp > start_first_exec_time: {timestamp} > {start_first_exec_time}")
             async_write_list = []
+            # print("\n\n------------\n\n")
             expected_real_insert_cnt = 0
             if self._kv_cache_controller._gpu_write_through_cpu:
                 # If not, do not write to CPU here.
                 # NOTE: If already in trie, pinned by set_do_not_evict, if not, not possible to get evicted.
                 # self._kv_cache_controller._kv_block_trie.check_size_consistency()
+                # print("\n\n---------------\n\n")
+                # for reid, th_node in new_full_blocks_list:
+                #     print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
                 new_list = self._kv_cache_controller.filter_write_to_CPU_and_preaccess(new_full_blocks_list, timestamp)
-                needed_block_number = len(new_list)
+                # print("\n")
+                # for reid, th_node in new_list:
+                #     print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
+                # for new_node in new_list:
+                #     print(f"Expected insert CPU node: {new_node[1].id}")
+                # FIXME:
+                # The ones swapped out from swicth into cache can also demand space in CPU for write through.
+                # Anyway, at most len(new_full_blocks_list) blocks can be inserted into CPU.
+                # needed_block_number = len(new_list)
+                needed_block_number = len(new_full_blocks_list)
                 expected_real_insert_cnt = needed_block_number
+                # print(f"Expected insert CPU node: {needed_block_number}")
+                
                 end_cpu_make_space_time, end_cpu_make_space_fir_time, cpu_make_space_per_layer_time = \
                 self._kv_cache_controller.make_space_for_CPU(needed_block_number, timestamp)
+                # print("\n")
+                # for reid, th_node in new_list:
+                #     print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
                 end_last_cpu_make_space_layer_time = timestamp # Get per layer time that CPU memory is available.
                 # Make CPU has this much space to write to, can trigger eviction to disks.
             # print(f"per_layer_execution_time: {per_layer_execution_time}, load_per_layer_time: {load_per_layer_time}")
@@ -121,13 +139,24 @@ class ReplicaStageScheduler:
             if len(new_full_blocks_list) > 0:
                 self._kv_cache_controller.switch_active_fullblocks_into_cache(new_full_blocks_list, 
                                                                         end_execution_time, end_exec_of_first_layer)
+                # new full blocks list is actually changed after this call, some blocks can be duplicated.
+                # Filter them out.
+                block_id_set = set()
+                next_list = []
+                for block in new_full_blocks_list:
+                    if block[1].id not in block_id_set:
+                        next_list.append(block)
+                        block_id_set.add(block[1].id)
+                new_full_blocks_list = next_list
                 if self._kv_cache_controller._gpu_write_through_cpu:
                     assert len(async_write_list) == self._kv_cache_controller.num_layers
                     # Set present time in CPU.
                     real_insert_cnt = self._kv_cache_controller.set_full_block_present_in_after_async_write(new_full_blocks_list, 
                                                                                         async_write_list[-1],
                                                                                         async_write_list[0])
-                    assert real_insert_cnt == expected_real_insert_cnt, f"{real_insert_cnt} != {expected_real_insert_cnt}"
+                    # So can be not ==, just <=.
+                    # The eviction can be too aggresive.
+                    assert real_insert_cnt <= expected_real_insert_cnt, f"{real_insert_cnt} > {expected_real_insert_cnt}, len(new_full_blocks_list): {len(new_full_blocks_list)}"
                     # print(f"real_insert_cnt: {real_insert_cnt}, expected_real_insert_cnt: {expected_real_insert_cnt}")
             # self._kv_cache_controller._kv_block_trie.check_size_consistency()
         else:
