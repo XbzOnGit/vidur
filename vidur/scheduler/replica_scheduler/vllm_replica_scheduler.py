@@ -76,6 +76,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
         self.allocate(request.id, 1)
 
     def cache_reorder(self):
+        # print("Cache reorder.")
         for request in self._request_queue:
             # FIXME: Now take the first as flag.
             hit_trace = self.get_kv_controller(0).lookup(request, -1.0)
@@ -132,6 +133,7 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
 
             self._allocate_request(request)
             requests.append(request)
+            # print(f"Request {request.id} is appended to requests.")
             num_tokens.append(next_num_tokens)
             num_batch_tokens += next_num_tokens
         # if not self._request_queue:

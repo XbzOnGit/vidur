@@ -68,6 +68,7 @@ class BaseReplicaScheduler(ABC):
         print(f"cache_lookup_type: {replica_scheduler_config.cache_lookup_type}")
         print(f"cache_evict_type: {replica_scheduler_config.cache_evict_type}")
         print(f"cache_evict_op: {replica_scheduler_config.cache_evict_op}")
+        print(f"cache_reordering: {self._cache_reordering}")
         print(f"space per token on one stage: {(2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages}")
         space_per_token = (2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages
         # per stage.
@@ -102,7 +103,6 @@ class BaseReplicaScheduler(ABC):
             # Here no per TP, cos considered together.
             available_kv_memory_gpu_per_stage = available_memory_per_stage - param_size_per_device
             num_blocks = int(available_kv_memory_gpu_per_stage // space_per_block)
-            print(f"About {available_kv_memory_gpu_per_stage / space_per_token} tokens can be stored in one stage's GPU.\n\n")
             assert num_blocks > 0
             read_thput = 0
             write_thput = 0
@@ -116,11 +116,14 @@ class BaseReplicaScheduler(ABC):
                                     replica_scheduler_config.cache_evict_op,
                                     gpu_threshold_block, 
                                     space_per_token_per_layer)
+            print(f"About {(num_blocks - gpu_read_buffer_blocks) * replica_scheduler_config.block_size} tokens can be stored in one stage's GPU.\n\n")
             if len(replica_scheduler_config.cpu_memory_size) > 0:
                 layer_of_storage = 2 if len(replica_scheduler_config.disk_size) == 0 else 3
                 cpu_memory_size = _parse_memory_size(replica_scheduler_config.cpu_memory_size)
                 cpu_num_blocks = int(cpu_memory_size // space_per_block)
-                cpu_sysbuf_fraction = replica_scheduler_config.cpu_sysbuf_fraction
+                cpu_sysbuf_fraction = 0.0
+                if replica_scheduler_config.disk_cpu_prefetch:
+                    cpu_sysbuf_fraction = replica_scheduler_config.cpu_sysbuf_fraction
                 cpu_sysbuf_space = int(cpu_memory_size * cpu_sysbuf_fraction)
                 cpu_sysbuf_blocks = cpu_sysbuf_space // space_per_block
                 cpu_sysbuf_space = cpu_sysbuf_blocks * space_per_block
@@ -133,6 +136,7 @@ class BaseReplicaScheduler(ABC):
                 if layer_of_storage == 3:
                     cpu_read_thput = _parse_thput(replica_scheduler_config.disk_cpu_thput)
                     cpu_write_thput = _parse_thput(replica_scheduler_config.cpu_disk_thput)
+                print(f"About {(cpu_num_blocks - cpu_sysbuf_blocks) * replica_scheduler_config.block_size} tokens can be stored in one stage's CPU.\n\n")
                 controller.append_layer(cpu_num_blocks, cpu_read_thput, cpu_write_thput, replica_scheduler_config.cache_evict_type, cpu_evict_op, 
                                         cpu_threshold_blocks, space_per_token_per_layer)
                 if layer_of_storage == 3:
@@ -141,6 +145,7 @@ class BaseReplicaScheduler(ABC):
                     assert disk_num_blocks > 0
                     controller.append_layer(disk_num_blocks, 0, 0, replica_scheduler_config.cache_evict_type, 
                                             "discard", disk_num_blocks, space_per_token_per_layer)
+                    print(f"About {disk_num_blocks * replica_scheduler_config.block_size} tokens can be stored in one stage's Disk.\n\n")
                     # Make read_buffer size 0.
                     
                 

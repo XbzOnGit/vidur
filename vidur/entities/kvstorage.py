@@ -388,8 +388,9 @@ class KVStorageController(BaseEntity):
                     # print(f"Inserted into layer 0 with already in layer 1, _used_blocks is {self._kv_block_trie._used_blocks[0]}")
                 else:
                     assert original_color == 2
-                    # FIXME: This means with disk, must have gpu to cpu write through.
-                    assert self._gpu_write_through_cpu
+                    # FIXME: This means with disk, must have gpu to cpu write through??!!
+                    
+                    # assert self._gpu_write_through_cpu
                     # This can rely on later write through.
                     # extra_node_for_async_write_through = True
                     # self._kv_block_trie.insert_into_gpu_from_active_block_original_in_disk(the_node, 

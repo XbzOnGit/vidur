@@ -762,7 +762,7 @@ class KVBlockTrie:
         # print(f"Layer {layer_no} acquires {block_number} blocks.")
         # Print the function name of the traceback above this function.
         # print(f"Function name: {inspect.currentframe().f_back.f_code.co_name}")
-        assert availble_blocks_without_buffer >= 0
+        assert availble_blocks_without_buffer >= 0, f"layer: {layer_no}, {availble_blocks_without_buffer} < 0"
         if availble_blocks_without_buffer >= block_number:
             # Use that space.
             # NOTE: used_blocks changed.

@@ -100,7 +100,6 @@ class ReplicaStageScheduler:
                 expected_real_insert_cnt = needed_block_number
                 # print(f"Expected insert CPU node: {needed_block_number}")
                 
-                # BUG: make space actually acquired space here.
 
                 end_cpu_make_space_time, end_cpu_make_space_fir_time, cpu_make_space_per_layer_time = \
                 self._kv_cache_controller.acquire_space_for_CPU(needed_block_number, timestamp)
@@ -133,6 +132,9 @@ class ReplicaStageScheduler:
                 # Assume that preload is continuous.
                 end_last_preload_time += load_per_layer_time
             end_execution_time = end_last_exec_time
+            # print(f"end_execution_time for {batch.id}: {end_execution_time}")
+            # print(f"{batch.id}, {batch.request_ids}, {batch.num_tokens}, {batch.num_prefill_tokens}, {batch.num_decode_tokens}")
+            # print("\n\n")
             # print(f"end_execution_time for {batch.id}: {end_execution_time}")
             # print(f"preload end time: {start_first_exec_time - load_per_layer_time + load_per_layer_time * self._kv_cache_controller.num_layers}")
             # print(f"preload constraint end: {start_first_exec_time - load_per_layer_time + load_per_layer_time * self._kv_cache_controller.num_layers + per_layer_execution_time}")
