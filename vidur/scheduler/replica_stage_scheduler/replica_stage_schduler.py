@@ -100,8 +100,10 @@ class ReplicaStageScheduler:
                 expected_real_insert_cnt = needed_block_number
                 # print(f"Expected insert CPU node: {needed_block_number}")
                 
+                # BUG: make space actually acquired space here.
+
                 end_cpu_make_space_time, end_cpu_make_space_fir_time, cpu_make_space_per_layer_time = \
-                self._kv_cache_controller.make_space_for_CPU(needed_block_number, timestamp)
+                self._kv_cache_controller.acquire_space_for_CPU(needed_block_number, timestamp)
                 # print("\n")
                 # for reid, th_node in new_list:
                 #     print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
@@ -158,6 +160,10 @@ class ReplicaStageScheduler:
                     # The eviction can be too aggresive.
                     assert real_insert_cnt <= expected_real_insert_cnt, f"{real_insert_cnt} > {expected_real_insert_cnt}, len(new_full_blocks_list): {len(new_full_blocks_list)}"
                     # print(f"real_insert_cnt: {real_insert_cnt}, expected_real_insert_cnt: {expected_real_insert_cnt}")
+                    diff_cnt = expected_real_insert_cnt - real_insert_cnt
+                    # Free those too much.
+                    if diff_cnt > 0:
+                        self._kv_cache_controller.free_space_for_CPU(diff_cnt)
             # self._kv_cache_controller._kv_block_trie.check_size_consistency()
         else:
             end_execution_time = start_first_exec_time + execution_time.total_time

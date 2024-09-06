@@ -784,7 +784,6 @@ class KVBlockTrie:
                 # No synced time.
                 # NOTE: used_blocks changed.
                 assert self._used_blocks[layer_no] + block_number <= self._num_blocks[layer_no]
-                # self._used_blocks[layer_no] += block_number
                 # assert self._used_blocks[layer_no] <= self._num_blocks[layer_no], f"Two: {self._used_blocks[layer_no]} > {self._num_blocks[layer_no]}"
                 # And evict to make space for read buffer.
                 # FIXME: Assume that the read buffer is available before the end execution of last batch.
@@ -793,7 +792,6 @@ class KVBlockTrie:
                 # Also swap the space for read buffer.
 
                 # FIXME: Does this guarantee those loaded in here not evicted immediately?
-                self._used_blocks[layer_no] += block_number
                 if not allow_lower_write:
                     evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_synced_write)
                     assert evict_per == 0
@@ -803,6 +801,9 @@ class KVBlockTrie:
                     evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, False)
                 assert self._used_blocks[layer_no] <= self._num_threshold_blocks[layer_no]
                 # self._get_size(layer_no)
+                # Put it here, then consistent when entering the _evict_blocks.
+
+                self._used_blocks[layer_no] += block_number
                 return evict_end, evict_fir, evict_per
             else:
                 evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_synced_write)
@@ -833,6 +834,18 @@ class KVBlockTrie:
         self._active_blocks[0] -= number
         assert self._used_blocks[0] >= 0
         assert self._active_blocks[0] >= 0
+        return
+    
+    def direct_free_memory(self, layer_no, number):
+        assert len(self._used_blocks) > 0
+        assert len(self._num_blocks) > 0
+        assert number >= 0
+        assert self._num_threshold_blocks[layer_no] >= self._used_blocks[layer_no]
+        assert self._num_blocks[layer_no] >= self._used_blocks[layer_no]
+        assert number <= self._used_blocks[layer_no], f"{number} > {self._used_blocks[layer_no]}"
+        # NOTE: used_blocks changed.
+        self._used_blocks[layer_no] -= number
+        assert self._used_blocks[layer_no] >= 0
         return
     
     

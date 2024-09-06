@@ -432,8 +432,11 @@ class KVStorageController(BaseEntity):
                 the_node.timestamp_update(timestamp)
         return new_list
     
-    def make_space_for_CPU(self, number_of_blocks_to_write: int, timestamp):
+    def acquire_space_for_CPU(self, number_of_blocks_to_write: int, timestamp):
         return self._kv_block_trie.synced_acquire_space(1, number_of_blocks_to_write, timestamp, False, False)
+    
+    def free_space_for_CPU(self, free_cnt):
+        self._kv_block_trie.direct_free_memory(1, free_cnt)
     
     def use_channel(self, storage_layer, block_number, op_type, timestamp, num_layer):
         return self._kv_block_trie.get_channel(storage_layer)[op_type].transmit(block_number * self._block_size, timestamp, num_layer)
