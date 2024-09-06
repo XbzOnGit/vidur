@@ -66,6 +66,12 @@ class Request(BaseEntity):
         self._kv_insert_time = 0.0
         self._kv_inserted = False
         self._full_kvblocks = None
+        self._first_token_time = 0.0
+
+    @property
+    def ttft(self) -> float:
+        assert self._first_token_time >= self._arrived_at
+        return self._first_token_time - self._arrived_at
 
     @property
     def size(self) -> Tuple[int, int]:
@@ -311,7 +317,10 @@ class Request(BaseEntity):
             # tokens to the prefill tokens - that is irrelevant to the original prefill
             if self._prefill_completed_at == 0:
                 self._prefill_completed_at = time
-
+        if self._num_processed_tokens > self._num_prefill_tokens:
+            if self._first_token_time == 0.0:
+                assert time > 0.0
+                self._first_token_time = time
         # check if request is completed
         if self._num_processed_tokens == self.total_tokens:
             self._completed_at = time

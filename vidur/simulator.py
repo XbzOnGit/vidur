@@ -28,6 +28,7 @@ class Simulator:
 
         self._event_trace = []
         self._event_chrome_trace = []
+        self._requests = []
 
         self._cluster = Cluster(
             self._config.cluster_config,
@@ -86,6 +87,15 @@ class Simulator:
         assert self._scheduler.is_empty() or self._terminate
 
         logger.info(f"Simulation ended at: {self._time}s")
+        if self._time > 0:
+            logger.info(f"Throughput: {len(self._requests) / self._time}")
+        if len(self._requests) > 0:
+            sum_of_ttft = 0.0
+            for req in self._requests:
+                ttft = req.ttft
+                sum_of_ttft += ttft
+            avg_ttft = sum_of_ttft / len(self._requests)
+            logger.info(f"Average TTFT: {avg_ttft}")
 
     def _write_output(self) -> None:
         logger.info("Writing output")
@@ -114,7 +124,7 @@ class Simulator:
             requests = self._request_generator.generate()
         else:
             requests = self._requests_injected
-
+        self._requests = requests
         for request in requests:
             self._add_event(RequestArrivalEvent(request.arrived_at, request))
 
