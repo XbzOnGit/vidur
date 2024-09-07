@@ -69,6 +69,10 @@ class Request(BaseEntity):
         self._first_token_time = 0.0
 
     @property
+    def first_token_time(self):
+        return self._first_token_time
+    
+    @property
     def ttft(self) -> float:
         assert self._first_token_time >= self._arrived_at
         return self._first_token_time - self._arrived_at
