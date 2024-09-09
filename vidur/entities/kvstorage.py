@@ -23,7 +23,8 @@ Always restore before the batch gets to be processed, cos for this batch_stage, 
 # All memory, including those in lower memory, are managed in blocks.
 class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
-                 gpu_write_through_cpu: bool, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool):
+                 gpu_write_through_cpu: bool, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, execution_time_predictor, 
+                 pipeline_stage_id: int):
         # Now always fetch the longest path.
         self._id = KVStorageController.generate_id()
         self._kv_block_trie = KVBlockTrie(layer_pipeline, block_size, num_layers_per_node, 
@@ -55,6 +56,9 @@ class KVStorageController(BaseEntity):
         self._preload_start_before_schedule_time = 0.0
         self._read_buffer_available = []
         self._scheduler_aware_eviction = scheduler_aware_eviction
+        self._execution_time_predictor = execution_time_predictor
+        self._stage_id = pipeline_stage_id
+        self._map_from_reqid_to_request = {} # All requests that are scheduled.
         atexit.register(self.dump_stats)
 
     def set_read_buffer_available(self, layer_no, timepoint):
@@ -99,6 +103,7 @@ class KVStorageController(BaseEntity):
         # TODO: Add support for disk, now it's not the same with CachedAttention.
         # print(f"On batch_stage timestamp: {timestamp}")
         hit_traces = []
+        pgdsf_alpha_beta_info = []
         preload_set: Set[KVBlockTrieNode] = set()
         synced_fetch_from_disk_to_memory_set: Set[KVBlockTrieNode] = set()
         preload_list: List[KVBlockTrieNode] = []
@@ -110,6 +115,7 @@ class KVStorageController(BaseEntity):
         bidx = 0
         max_arrival_time = max([request.arrived_at for request in batch_to_hack.requests])
         for request in batch_to_hack.requests:
+            self._map_from_reqid_to_request[request.id] = request
             # print(f"\nRequest {request.id} starts to be hacked.")
             hit_trace: List[KVBlockTrieNode] = self.lookup(request, timestamp)
             hit_traces.append(hit_trace)
@@ -151,7 +157,12 @@ class KVStorageController(BaseEntity):
                     # print(f"Remove {hit.id} from evict of layer {color}, due to hit.")
                     hit.remove_from_evict_heap()
             hit_length = len(hit_trace) - 1
-            # DEBUG:
+            if request.pdgsf_alpha_on_prefill is None:
+                request.set_pdgsf_alpha_on_prefill(hit_length * self._block_size)
+                request.set_pdgsf_beta_on_prefill(request.num_prefill_tokens - request.pdgsf_alpha_on_prefill)
+                pgdsf_alpha_beta_info.append((request.pdgsf_alpha_on_prefill, request.pdgsf_beta_on_prefill))
+            else:
+                pgdsf_alpha_beta_info.append(None)
             assert all(not hit.is_in_evict_heap for hit in hit_trace[1:])
             # print(f"Request {request.id} has hit length: {hit_length}\n\n")
             assert request.num_processed_tokens // self._block_size <= hit_length, f"{request.num_processed_tokens} // {self._block_size} > {hit_length}, id is {request.id}"
@@ -281,12 +292,21 @@ class KVStorageController(BaseEntity):
         # Now everything should be in GPU.
         # And no more eviction in this batch.
         # Before switching into cache, only the last one in hit trace possible to be evictable.
+        rhidx = 0
         for h_tr in hit_traces:
             h_len = len(h_tr) - 1
             for h in h_tr[1:]:
                 assert h.color == 0
                 # Note that there can be the same block in different hit traces.
                 # So do not assert do_not_evict here.
+
+                # NOTE: Update pgdsf here, when they all changed color.
+                if self._kv_block_trie.is_pgdsf_eviction[0]:
+                    # def pgdsf_update(self, exec_time_of_request, beta, is_cached, layer_no):
+                    if pgdsf_alpha_beta_info[rhidx] is not None:
+                        # not None means alpha is None before, first time.
+                        # Here update one time for hit blocks on each request.
+                        h.pgdsf_update(-1, -1, True, h.color)
                 h.set_do_not_evict(False)
             if h_len > 0:
                 last_hit: KVBlockTrieNode = h_tr[h_len]
@@ -295,6 +315,7 @@ class KVStorageController(BaseEntity):
                 last_hit.callback_on_possible_leaf_change()
                 # if last_hit.is_in_evict_heap:
                 #     print(f"Add {last_hit.id} to evict of layer {last_hit.color} after possible leaf change.")
+            rhidx += 1
                 
         # Hack && restore ALL related indirect numbers of 
         # num_processed_tokens and prefill_complete and prefill_complete_time, num_tokens of batch.
@@ -465,13 +486,34 @@ class KVStorageController(BaseEntity):
         # Space should be enough.
         # Must insert in order.
         replace_list = []
+        modify_parent_dict = {}
         for reqid, the_node in new_full_blocks_list:
             # Timestamp updated inside.
             # Space also acquired inside.
             # Should have been fetched.
+            if the_node.parent in modify_parent_dict:
+                original_parent_id = the_node.parent.id
+                the_node.parent = modify_parent_dict[the_node.parent]
+                # print(f"Parent of {the_node.id} is changed from {original_parent_id} to {the_node.parent.id}")
+            
+            if self._kv_block_trie.is_pgdsf_eviction[0]:
+                the_req = self._map_from_reqid_to_request[reqid]
+                alpha = the_req.pdgsf_alpha_on_prefill
+                # root depth is 0.
+                beta = the_node.depth * self._block_size - alpha
+                assert beta >= 0
+                time_pred = self._execution_time_predictor.pgdsf_predict_time(alpha, beta, self._stage_id)
+                the_node.pgdsf_update(time_pred, beta, False, 0)
+                
             new_node = self._insert_with_prepared_node_into_layer0(the_node, end_time, end_firlayer_time)
+            # NOTE: When some block is found to be already in trie, the parent node of its son should be changed.
             if new_node == the_node:
                 real_insert += 1
+            else:
+                # Modify parent.
+                modify_parent_dict[the_node] = new_node
+                if self._kv_block_trie.is_pgdsf_eviction[0]:
+                    new_node.pgdsf_transfer(the_node)
             replace_list.append((reqid, new_node))
         # print(f"Switch into cache: {real_insert} out of {len(new_full_blocks_list)}.")
         now_blocks = self._kv_block_trie.available_blocks(0)
@@ -488,12 +530,6 @@ class KVStorageController(BaseEntity):
         global call_cnt
         call_cnt += 1
         cnt = 0
-        # if call_cnt >= 182:
-        #     print("BEFORE insert into CPU.")
-        #     for reid, th_node in new_full_blocks_list:
-        #         print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
-        #     print("\n\n")
-        # print(f"New full blocks list: {new_full_blocks_list}")
         for reqid, the_node in new_full_blocks_list:
             assert reqid in self._active_blocks
             assert the_node.color == 0 # Must be present in GPU.
@@ -502,13 +538,6 @@ class KVStorageController(BaseEntity):
                 self._kv_block_trie.add_insert(1)
                 the_node.push_to_lower_location(end_time, end_firlayer_time)
                 cnt += 1
-            '''
-            if call_cnt >= 182:
-                print(f"After INSERTING {the_node.id} into CPU.")
-                for reid, th_node in new_full_blocks_list:
-                    print(f"the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
-                print("\n\n")
-            '''
         # print(f"call_cnt: {call_cnt}")
         return cnt
 

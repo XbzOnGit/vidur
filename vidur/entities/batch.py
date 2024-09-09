@@ -32,8 +32,12 @@ class Batch(BaseEntity):
         replica_id: int,
         requests: List[Request],
         num_tokens: List[int],
+        no_gen_id: bool = False,
     ) -> None:
-        self._id = Batch.generate_id()
+        if not no_gen_id:
+            self._id = Batch.generate_id()
+        else:
+            self._id = -1
         self._replica_id = replica_id
 
         self._requests = requests

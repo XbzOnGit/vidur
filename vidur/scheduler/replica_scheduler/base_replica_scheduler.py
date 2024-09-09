@@ -89,6 +89,8 @@ class BaseReplicaScheduler(ABC):
         param_size_per_device = memory_planner.get_param_memory_per_device()
         self._replica_kv_controllers = []
         if replica_scheduler_config.cache_lookup_type is not None:
+            # FIXME: Now no PP.
+            assert num_stages == 1
             layer_pipeline = replica_scheduler_config.layer_pipeline
             gpu_write_through_cpu = replica_scheduler_config.gpu_write_through_cpu
             disk_cpu_prefetch = replica_scheduler_config.disk_cpu_prefetch
@@ -96,8 +98,10 @@ class BaseReplicaScheduler(ABC):
             if read_pipeline_buffer:
                 assert gpu_write_through_cpu, "GPU write through CPU must be enabled when read pipeline buffer is enabled."
             # read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
+            # FIXME: Now no PP, always stage_id 0 in KVStorageController.
             controller = KVStorageController(replica_scheduler_config.block_size, layer_pipeline, replica.num_layers // num_stages,
-                                             read_pipeline_buffer, gpu_write_through_cpu, disk_cpu_prefetch, scheduler_aware_eviction)
+                                             read_pipeline_buffer, gpu_write_through_cpu, disk_cpu_prefetch, 
+                                             scheduler_aware_eviction, execution_time_predictor, 0)
             self._replica_kv_controllers.append(controller)
             # Space per token for each stage(each node).
             # Here no per TP, cos considered together.

@@ -34,8 +34,12 @@ class Request(BaseEntity):
         num_decode_tokens: int,
         num_processed_tokens: int = 0,
         tokens: Optional[List[str]] = None,
+        no_gen_id: bool = False,
     ):
-        self._id = Request.generate_id()
+        if not no_gen_id:
+            self._id = Request.generate_id()
+        else:
+            self._id = None
         self._arrived_at = arrived_at
         self._num_prefill_tokens = num_prefill_tokens
         self._num_decode_tokens = num_decode_tokens
@@ -67,6 +71,9 @@ class Request(BaseEntity):
         self._kv_inserted = False
         self._full_kvblocks = None
         self._first_token_time = 0.0
+
+        self._pdgsf_alpha_on_prefill = None
+        self._pdgsf_beta_on_prefill = None
 
     @property
     def first_token_time(self):
@@ -402,7 +409,25 @@ class Request(BaseEntity):
         self._kv_inserted = False
         self._kv_fetch_time = 0
         self._kv_insert_time = 0
+
+        self._pdgsf_alpha_on_prefill = None
+        self._pdgsf_beta_on_prefill = None
         for kv_controller in self._replica_scheduler.get_all_kv_controllers():
             # print(f"Request {self._id} restarting")
             if kv_controller is not None:
                 kv_controller.request_callback_on_restart_and_complete(self)
+
+    @property
+    def pdgsf_alpha_on_prefill(self):
+        return self._pdgsf_alpha_on_prefill
+    
+    @property
+    def pdgsf_beta_on_prefill(self):
+        return self._pdgsf_beta_on_prefill
+    
+    def set_pdgsf_alpha_on_prefill(self, alpha):
+        self._pdgsf_alpha_on_prefill = alpha
+
+    def set_pdgsf_beta_on_prefill(self, beta):
+        self._pdgsf_beta_on_prefill = beta
+

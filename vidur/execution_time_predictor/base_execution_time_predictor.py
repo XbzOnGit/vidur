@@ -6,7 +6,7 @@ from vidur.config import (
     MetricsConfig,
     ReplicaConfig,
 )
-from vidur.entities import Batch, ExecutionTime
+from vidur.entities import Batch, ExecutionTime, Request
 
 
 class BaseExecutionTimePredictor(ABC):
@@ -66,6 +66,13 @@ class BaseExecutionTimePredictor(ABC):
             self._get_process_model_outputs_time(batch),
             self._get_ray_comm_time(batch),
         )
+    
+    def pgdsf_predict_time(self, alpha, beta, pipeline_stage):
+        # NOTE: Assume all prefill, cos only prefill can hit.
+        req = Request(0.0, alpha+beta, 0, alpha, None, True)
+        num_token_in_batch = beta if beta > 0 else 1
+        batch = Batch(-1, [req], [num_token_in_batch], True)
+        return self.get_execution_time(batch, pipeline_stage).total_time
 
     @abstractmethod
     def _get_attention_layer_pre_proj_execution_time(self, batch: Batch) -> float:

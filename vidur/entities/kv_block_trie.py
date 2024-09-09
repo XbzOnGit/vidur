@@ -68,6 +68,13 @@ class KVBlockTrieNode:
         self._storage_layer_info = [(False, -1.0, -1.0), (False, -1.0, -1.0), (False, -1.0, -1.0)]
         self._children_color_cnt = [0, 0, 0]
 
+        self.pgdsf_frequency = 0
+        self.pgdsf_total_cost = 0
+        self.pgdsf_computenum = 0
+        self.pgdsf_avgcost = 0
+        self.pgdsf_priority = 0
+        self.last_pgdsf_priority_update_layer = -1
+
 
         self._tokens_parent_to_here = tokens_parent_to_here
         self._kvtrie: KVBlockTrie = kvtrie
@@ -228,6 +235,7 @@ class KVBlockTrieNode:
         assert self.evict_timestamp[0] >= 0, f"{self.evict_timestamp}, id: {self.id}"
         assert self.evict_timestamp[1] < 0
         color = self.color
+        self.set_pgdsf_priority(color) # Possible to switch to another clock.
         self._kvtrie.add_evict_heap_size(color, 1)
         # print(f"Add block {self.id} to layer {color} evict heap.")
         the_array = self._kvtrie.evict_candidates[color]
@@ -338,14 +346,70 @@ class KVBlockTrieNode:
         color = self.color
         assert color >= 0, f"{self.id} {color}"
         assert self._storage_layer_info[color][0]
+        if self._kvtrie.no_real_timestamp_update[color]:
+            return
         old_access_time = self._evict_timestamp[0]
         self._evict_timestamp = (new_access_time, -self.depth)
         if self.is_in_evict_heap:
             assert old_access_time <= new_access_time
             self.sift_down_evict_heap(False)
+
+    def set_pgdsf_priority(self, layer_no):
+        self.pgdsf_priority = self._kvtrie.pgdsf_clock[layer_no] + self.pgdsf_avgcost * self.pgdsf_frequency
+        self.last_pgdsf_priority_update_layer = layer_no
+
+
+
+    def pgdsf_update(self, exec_time_of_request, beta, is_cached, layer_no):
+        # print(f"Update {self.id} with exec_time_of_request: {exec_time_of_request}, beta: {beta}, is_cached: {is_cached}, layer_no: {layer_no}")
+        assert self._kvtrie.is_pgdsf_eviction[layer_no]
+        self.pgdsf_frequency += 1
+        if not is_cached:
+            assert beta > 0
+            self.pgdsf_total_cost += exec_time_of_request / beta
+            self.pgdsf_computenum += 1
+            self.pgdsf_avgcost = self.pgdsf_total_cost / self.pgdsf_computenum
+        assert self.pgdsf_computenum > 0
+        if self.is_in_evict_heap:
+            assert self.pgdsf_priority == self.evict_timestamp[0]
+        # Use the corresponding layer's color, that clock.
+        self.set_pgdsf_priority(layer_no)
+        # print(f"Update on node {self.id} with layer {layer_no}, is_cached {is_cached}, color {self.color}, with clock {self._kvtrie.pgdsf_clock[layer_no]}, frequency {self.pgdsf_frequency}, avgcost {self.pgdsf_avgcost}, priority {self.pgdsf_priority}")
+        if self.is_in_evict_heap:
+            if self.pgdsf_priority < self.evict_timestamp[0]:
+                self._evict_timestamp = (self.pgdsf_priority, -self.depth)
+                self.sift_up_evict_heap(False)
+            else:
+                self._evict_timestamp = (self.pgdsf_priority, -self.depth)
+                self.sift_down_evict_heap(False)
+        else:
+            self._evict_timestamp = (self.pgdsf_priority, -self.depth)
+    
         
-        
-        
+    def pgdsf_transfer(self, from_temp_new_node):
+        assert from_temp_new_node.pgdsf_frequency == 1
+        assert from_temp_new_node.pgdsf_computenum == 1
+        self.pgdsf_frequency += 1
+        self.pgdsf_total_cost += from_temp_new_node.pgdsf_total_cost
+        self.pgdsf_computenum += 1
+        self.pgdsf_avgcost = self.pgdsf_total_cost / self.pgdsf_computenum
+        if self.is_in_evict_heap:
+            assert self.pgdsf_priority == self.evict_timestamp[0]
+        color = self.color
+        assert color >= 0
+        assert self._kvtrie.is_pgdsf_eviction[color]
+        self.set_pgdsf_priority(color)
+        # print(f"transfer to node {self.id} with color {self.color}, with clock {self._kvtrie.pgdsf_clock[self.color]}, frequency {self.pgdsf_frequency}, avgcost {self.pgdsf_avgcost}, priority {self.pgdsf_priority}, from node {from_temp_new_node.id}")
+        if self.is_in_evict_heap:
+            if self.pgdsf_priority < self.evict_timestamp[0]:
+                self._evict_timestamp = (self.pgdsf_priority, -self.depth)
+                self.sift_up_evict_heap(False)
+            else:
+                self._evict_timestamp = (self.pgdsf_priority, -self.depth)
+                self.sift_down_evict_heap(False)
+        else:
+            self._evict_timestamp = (self.pgdsf_priority, -self.depth)
+
 
 
     def callback_on_evict(self, from_no: int, to_no: int, timestamp, layer_timestamp):
@@ -551,6 +615,10 @@ class KVBlockTrie:
         self._disk_cpu_prefetch = disk_cpu_prefetch
         self._scheduler_aware_eviction = scheduler_aware_eviction
 
+        self._no_real_timestamp_update = [False, False, False]
+        self._is_pgdsf_eviction = [False, False, False]
+        self._pgdsf_clock = []
+
         atexit.register(self.dump_stats)
 
     
@@ -668,6 +736,8 @@ class KVBlockTrie:
             self.add_evict(layer_no)
             evict_node: KVBlockTrieNode = evict_selection_function(layer_no)
             assert evict_node is not None
+            assert not evict_node.do_not_evict
+            assert not evict_node.is_in_evict_heap
             evicted_nodes.append(evict_node)
             assert evict_node.parent is not None
             original_color = evict_node.color
@@ -945,6 +1015,15 @@ class KVBlockTrie:
         assert len(self.evict_candidates[layer_no]) == original_size - 1
         return evicted_node
     
+    def eviction_selection_pgdsf(self, layer_no: int):
+        evicted_node: KVBlockTrieNode = self.evict_selection_lru(layer_no)
+        assert evicted_node.last_pgdsf_priority_update_layer == layer_no
+        if evicted_node.evict_timestamp[0] > self._pgdsf_clock[layer_no]:
+            original_clock = self._pgdsf_clock[layer_no]
+            self._pgdsf_clock[layer_no] = evicted_node.evict_timestamp[0]
+            # print(f"Layer {layer_no} clock updated from {original_clock} to {self._pgdsf_clock[layer_no]}")
+        return evicted_node
+    
     def add_insert(self, layer_no: int, add_number: int = 1):
         self._insert_cnt[layer_no] += add_number
     def add_evict(self, layer_no: int, add_number: int = 1):
@@ -962,10 +1041,13 @@ class KVBlockTrie:
         self._active_blocks.append(0)
         # print(f"layer: {len(self._num_blocks) - 1}, num_blocks: {num_blocks}, threshold_blocks: {threshold_blocks}")
         self._channel_from_this_to_lower.append((Channel(read_thput, space_per_token_per_layer), Channel(write_thput, space_per_token_per_layer)))
-        # FIXME: Now only LRU.
-        assert evict_policy.upper() == "LRU"
         if evict_policy.upper() == "LRU":
             self.eviction_selection.append(self.evict_selection_lru)
+        elif evict_policy.upper() == "PGDSF":
+            self.eviction_selection.append(self.eviction_selection_pgdsf)
+            self._no_real_timestamp_update[len(self._num_blocks) - 1] = True
+            self._is_pgdsf_eviction[len(self._num_blocks) - 1] = True
+            self._pgdsf_clock.append(0)
         elif evict_policy.upper() == "MRU":
             raise NotImplementedError("MRU not implemented.")
         else:
@@ -993,6 +1075,18 @@ class KVBlockTrie:
     @property
     def evict_candidates(self):
         return self._evict_candidates
+    
+    @property
+    def no_real_timestamp_update(self):
+        return self._no_real_timestamp_update
+    
+    @property
+    def is_pgdsf_eviction(self):
+        return self._is_pgdsf_eviction
+    
+    @property
+    def pgdsf_clock(self):
+        return self._pgdsf_clock
 
 def get_general_kv_block_size():
     global general_kv_block_size
