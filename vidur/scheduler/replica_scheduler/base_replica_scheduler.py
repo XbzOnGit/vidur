@@ -87,7 +87,7 @@ class BaseReplicaScheduler(ABC):
         gpu_read_buffer_space = gpu_read_buffer_blocks * space_per_block
         memory_planner = MemoryPlanner(self._replica_config, replica, gpu_read_buffer_space) # Should not see that part.
         param_size_per_device = memory_planner.get_param_memory_per_device()
-        self._replica_kv_controllers = []
+        self._replica_kv_controllers: List[KVStorageController] = []
         if replica_scheduler_config.cache_lookup_type is not None:
             # FIXME: Now no PP.
             assert num_stages == 1
@@ -95,6 +95,9 @@ class BaseReplicaScheduler(ABC):
             gpu_write_through_cpu = replica_scheduler_config.gpu_write_through_cpu
             disk_cpu_prefetch = replica_scheduler_config.disk_cpu_prefetch
             scheduler_aware_eviction = replica_scheduler_config.scheduler_aware_eviction
+            if disk_cpu_prefetch or scheduler_aware_eviction:
+                assert layer_pipeline
+                assert gpu_write_through_cpu
             if read_pipeline_buffer:
                 assert gpu_write_through_cpu, "GPU write through CPU must be enabled when read pipeline buffer is enabled."
             # read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
@@ -224,6 +227,8 @@ class BaseReplicaScheduler(ABC):
 
     def add_request(self, request: Request) -> None:
         self._request_queue.append(request)
+        if self.check_if_scheduler_aware_eviction_in_cachedattention():
+            self.cached_attention_window_update()
 
     def get_replica_stage_scheduler(self, stage_id: int):
         return self._replica_stage_schedulers[stage_id]
@@ -286,3 +291,6 @@ class BaseReplicaScheduler(ABC):
 
     def get_all_kv_controllers(self) -> List[KVStorageController]:
         return self._replica_kv_controllers
+    
+    def check_if_scheduler_aware_eviction_in_cachedattention(self):
+        return any([controller.scheduler_aware_eviction for controller in self._replica_kv_controllers])

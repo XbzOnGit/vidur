@@ -1,9 +1,7 @@
-from typing import List, Union, Tuple, Set
-import random
+from typing import List, Tuple, Set
 import atexit
 import math
-from collections import deque
-from vidur.entities.kv_block_trie import KVBlockTrie, KVBlock, KVBlockTrieNode
+from vidur.entities.kv_block_trie import KVBlockTrie, KVBlockTrieNode
 from vidur.entities.base_entity import BaseEntity
 from vidur.entities.communications import Channel
 from vidur.entities.batch import Batch
@@ -59,6 +57,11 @@ class KVStorageController(BaseEntity):
         self._execution_time_predictor = execution_time_predictor
         self._stage_id = pipeline_stage_id
         self._map_from_reqid_to_request = {} # All requests that are scheduled.
+        self._cachedattention_disk_eviction_window_length = 0
+        self._cachedattention_cpu_eviction_window_length = 0
+        self._cachedattention_newest_effective_mark = 0
+        self._previous_in_cpu_eviction_window = set()
+        self._previous_in_disk_eviction_window = set()
         atexit.register(self.dump_stats)
 
     def set_read_buffer_available(self, layer_no, timepoint):
@@ -74,6 +77,73 @@ class KVStorageController(BaseEntity):
                                          space_per_token_per_layer)
         self._storage_layer_cnt += 1
         self._read_buffer_available.append(0.0)
+        if self._scheduler_aware_eviction:
+            if self._storage_layer_cnt == 2:
+                # Those except buffer.
+                self._cachedattention_cpu_eviction_window_length = threshould_blocks
+            elif self._storage_layer_cnt == 3:
+                self._cachedattention_disk_eviction_window_length = threshould_blocks
+
+    @property
+    def scheduler_aware_eviction(self):
+        return self._scheduler_aware_eviction
+
+
+    def cachedattention_window_update(self, preempted_requests, requests_queue):
+        assert self._cachedattention_cpu_eviction_window_length > 0
+        assert self._cachedattention_disk_eviction_window_length > 0
+        assert self._cachedattention_disk_eviction_window_length >= self._cachedattention_cpu_eviction_window_length
+        if self._kv_block_trie.cachedattention_newest_mark >= 0:
+            assert self._kv_block_trie.cachedattention_newest_mark == self._cachedattention_newest_effective_mark
+        for node in self._previous_in_cpu_eviction_window:
+            assert node.cachedattention_in_cpu_eviction_window == self._cachedattention_newest_effective_mark
+            node.set_cachedattention_in_cpu_eviction_window(-1)
+        for node in self._previous_in_disk_eviction_window:
+            assert node.cachedattention_in_disk_eviction_window == self._cachedattention_newest_effective_mark
+            node.set_cachedattention_in_disk_eviction_window(-1)
+        self._previous_in_cpu_eviction_window.clear()
+        self._previous_in_disk_eviction_window.clear()
+        self._cachedattention_newest_effective_mark += 1
+        self._kv_block_trie.set_cachedattention_newest_mark(self._cachedattention_newest_effective_mark)
+        window_block_cnt = 0
+        status = 0
+        for req in preempted_requests:
+            hit_trace = self.lookup(req, -1.0)
+            for hit in hit_trace[1:]:
+                window_block_cnt += 1
+                if window_block_cnt > self._cachedattention_cpu_eviction_window_length:
+                    if status == 0:
+                        status = 1
+                if window_block_cnt > self._cachedattention_disk_eviction_window_length:
+                    assert status == 1
+                    status = 2
+                    break
+                if status == 0:
+                    hit.set_cachedattention_in_cpu_eviction_window(self._cachedattention_newest_effective_mark)
+                    self._previous_in_cpu_eviction_window.add(hit)
+                hit.set_cachedattention_in_disk_eviction_window(self._cachedattention_newest_effective_mark)
+                self._previous_in_disk_eviction_window.add(hit)
+            if status == 2:
+                break
+        if status < 2:
+            for req in requests_queue:
+                hit_trace = self.lookup(req, -1.0)
+                for hit in hit_trace[1:]:
+                    window_block_cnt += 1
+                    if window_block_cnt > self._cachedattention_cpu_eviction_window_length:
+                        if status == 0:
+                            status = 1
+                    if window_block_cnt > self._cachedattention_disk_eviction_window_length:
+                        assert status == 1, f"status == {status}"
+                        status = 2
+                        break
+                    if status == 0:
+                        hit.set_cachedattention_in_cpu_eviction_window(self._cachedattention_newest_effective_mark)
+                        self._previous_in_cpu_eviction_window.add(hit)
+                    hit.set_cachedattention_in_disk_eviction_window(self._cachedattention_newest_effective_mark)
+                    self._previous_in_disk_eviction_window.add(hit)
+                if status == 2:
+                    break
 
     def dump_stats(self):
         print()

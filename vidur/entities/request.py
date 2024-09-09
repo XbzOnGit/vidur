@@ -341,6 +341,7 @@ class Request(BaseEntity):
                 # print(f"Request {self._id} completed")
                 if kv_controller is not None:
                     kv_controller.request_callback_on_restart_and_complete(self)
+            self.cachedattention_window_update_on_complete_or_restart()
             logger.debug(f"Request {self._id} completed at {self._completed_at}")
 
     def on_batch_stage_schedule(
@@ -388,6 +389,10 @@ class Request(BaseEntity):
             "latest_iteration_completed_at": self._latest_iteration_completed_at,
             "num_restarts": self._num_restarts,
         }
+    
+    def cachedattention_window_update_on_complete_or_restart(self):
+        if self._replica_scheduler.check_if_scheduler_aware_eviction_in_cachedattention():
+            self._replica_scheduler.cached_attention_window_update()
 
     def restart(self):
         logger.debug(f"Restarting request {self._id}")
@@ -416,6 +421,7 @@ class Request(BaseEntity):
             # print(f"Request {self._id} restarting")
             if kv_controller is not None:
                 kv_controller.request_callback_on_restart_and_complete(self)
+        self.cachedattention_window_update_on_complete_or_restart()
 
     @property
     def pdgsf_alpha_on_prefill(self):

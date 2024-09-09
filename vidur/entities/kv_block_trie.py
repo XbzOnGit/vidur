@@ -76,6 +76,10 @@ class KVBlockTrieNode:
         self.last_pgdsf_priority_update_layer = -1
 
 
+        self._cachedattention_in_disk_eviction_window = -1
+        self._cachedattention_in_cpu_eviction_window = -1
+
+
         self._tokens_parent_to_here = tokens_parent_to_here
         self._kvtrie: KVBlockTrie = kvtrie
 
@@ -100,6 +104,19 @@ class KVBlockTrieNode:
         assert layer_no < self._kvtrie.num_storage_layers
         assert self._storage_layer_info[layer_no][0]
         return self._storage_layer_info[layer_no][1], self._storage_layer_info[layer_no][2]
+    @property
+    def cachedattention_in_disk_eviction_window(self):
+        return self._cachedattention_in_disk_eviction_window
+    
+    @property
+    def cachedattention_in_cpu_eviction_window(self):
+        return self._cachedattention_in_cpu_eviction_window
+    
+    def set_cachedattention_in_disk_eviction_window(self, value):
+        self._cachedattention_in_disk_eviction_window = value
+    
+    def set_cachedattention_in_cpu_eviction_window(self, value):
+        self._cachedattention_in_cpu_eviction_window = value
 
     @property
     def position_in_evict_heap(self):
@@ -231,13 +248,35 @@ class KVBlockTrieNode:
 
     def add_self_to_evict_heap(self):
         # print("Add to evict heap called.\n\n")
+        # These timestamps are timestamp_update first, then looked up when adding into heap.
+        # if self.id == 1581:
+        #     print(f"Add to evict heap on node {self.id} with color {self.color}, with timestamp {self.evict_timestamp} BEFORE")
+        if self._kvtrie.scheduler_aware_eviction:
+            timestamp = None
+            if self.evict_timestamp[1] < 0:
+                timestamp = self.evict_timestamp[0]
+            else:
+                timestamp = self.evict_timestamp[1]
+            assert timestamp >= 0
+            if self.color == 0:
+                self._evict_timestamp = (timestamp, -self.depth)
+            else:
+                if self.color == 1:
+                    self._evict_timestamp = (self._cachedattention_in_cpu_eviction_window, timestamp)
+                else:
+                    assert self.color == 2
+                    self._evict_timestamp = (self._cachedattention_in_disk_eviction_window, timestamp)
         assert not self.do_not_evict
-        assert self.evict_timestamp[0] >= 0, f"{self.evict_timestamp}, id: {self.id}"
-        assert self.evict_timestamp[1] < 0
+        # assert self.evict_timestamp[0] >= 0, f"{self.evict_timestamp}, id: {self.id}, layer: {self.color}"
+        # It can be < 0, if not in eviction window.
+        # assert self.evict_timestamp[1] < 0
+        # It can be >= 0, if in layer 1 and 2.
         color = self.color
-        self.set_pgdsf_priority(color) # Possible to switch to another clock.
+        if self._kvtrie.is_pgdsf_eviction[color]:
+            self.set_pgdsf_priority(color) # Possible to switch to another clock.
         self._kvtrie.add_evict_heap_size(color, 1)
         # print(f"Add block {self.id} to layer {color} evict heap.")
+        
         the_array = self._kvtrie.evict_candidates[color]
         original_len = len(the_array)
         assert self._position_in_evict_heap == -1
@@ -348,11 +387,30 @@ class KVBlockTrieNode:
         assert self._storage_layer_info[color][0]
         if self._kvtrie.no_real_timestamp_update[color]:
             return
-        old_access_time = self._evict_timestamp[0]
-        self._evict_timestamp = (new_access_time, -self.depth)
-        if self.is_in_evict_heap:
-            assert old_access_time <= new_access_time
-            self.sift_down_evict_heap(False)
+        another_form = False
+        original_timestamp = self._evict_timestamp
+        if self._kvtrie.scheduler_aware_eviction:
+            if color == 1:
+                self._evict_timestamp = (self._cachedattention_in_cpu_eviction_window, new_access_time)
+                another_form = True
+            elif color == 2:
+                self._evict_timestamp = (self._cachedattention_in_disk_eviction_window, new_access_time)
+                another_form = True
+        if not another_form:
+            old_access_time = self._evict_timestamp[0]
+            self._evict_timestamp = (new_access_time, -self.depth)
+            if self.is_in_evict_heap:
+                assert old_access_time <= new_access_time
+                self.sift_down_evict_heap(False)
+        else:
+            if self.is_in_evict_heap:
+                if self.evict_timestamp < original_timestamp:
+                    self.sift_up_evict_heap(False)
+                else:
+                    self.sift_down_evict_heap(False)
+        # if self.id == 1581:
+        #     print(f"Update timestamp on node {self.id} with color {self.color}, with new timestamp {new_access_time}, in the end: {self.evict_timestamp}")
+                
 
     def set_pgdsf_priority(self, layer_no):
         self.pgdsf_priority = self._kvtrie.pgdsf_clock[layer_no] + self.pgdsf_avgcost * self.pgdsf_frequency
@@ -614,14 +672,25 @@ class KVBlockTrie:
         self._layer_pipeline = layer_pipeline
         self._disk_cpu_prefetch = disk_cpu_prefetch
         self._scheduler_aware_eviction = scheduler_aware_eviction
+        self._cachedattention_newest_mark = -1
 
         self._no_real_timestamp_update = [False, False, False]
+        # scheduler eviction still has update, but in another form.
         self._is_pgdsf_eviction = [False, False, False]
         self._pgdsf_clock = []
 
         atexit.register(self.dump_stats)
 
+    def set_cachedattention_newest_mark(self, value):
+        self._cachedattention_newest_mark = value
     
+    @property
+    def cachedattention_newest_mark(self):
+        return self._cachedattention_newest_mark
+    
+    @property
+    def scheduler_aware_eviction(self):
+        return self._scheduler_aware_eviction
 
     def dump_stats(self):
         for i in range(len(self._num_blocks)):

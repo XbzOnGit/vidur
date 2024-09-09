@@ -191,3 +191,9 @@ class VLLMReplicaScheduler(BaseReplicaScheduler):
             return
 
         return Batch(self._replica_id, requests, num_tokens)
+
+    def cached_attention_window_update(self) -> None:
+        for controller in self._replica_kv_controllers:
+            if controller is not None:
+                if controller.scheduler_aware_eviction:
+                    controller.cachedattention_window_update(self._preempted_requests, self._request_queue)
