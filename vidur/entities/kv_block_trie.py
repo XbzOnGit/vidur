@@ -267,6 +267,9 @@ class KVBlockTrieNode:
                     assert self.color == 2
                     self._evict_timestamp = (self._cachedattention_in_disk_eviction_window, timestamp)
         assert not self.do_not_evict
+        if not self._kvtrie.scheduler_aware_eviction or self.color == 0:
+            assert self.evict_timestamp[0] >= 0
+            assert self.evict_timestamp[1] < 0
         # assert self.evict_timestamp[0] >= 0, f"{self.evict_timestamp}, id: {self.id}, layer: {self.color}"
         # It can be < 0, if not in eviction window.
         # assert self.evict_timestamp[1] < 0
@@ -274,6 +277,7 @@ class KVBlockTrieNode:
         color = self.color
         if self._kvtrie.is_pgdsf_eviction[color]:
             self.set_pgdsf_priority(color) # Possible to switch to another clock.
+            self._evict_timestamp = (self.pgdsf_priority, -self.depth)
         self._kvtrie.add_evict_heap_size(color, 1)
         # print(f"Add block {self.id} to layer {color} evict heap.")
         
@@ -500,7 +504,7 @@ class KVBlockTrieNode:
         self.callback_on_possible_leaf_change()
     
     def set_storage_layer_info_timestamps(self, layer_no, timestamp, layer_timestamp):
-        assert self._storage_layer_info[layer_no][0]
+        assert self._storage_layer_info[layer_no][0], f"{self.id} {layer_no}"
         assert self._storage_layer_info[layer_no][1] == float("inf")
         assert self._storage_layer_info[layer_no][2] == float("inf")
         self._storage_layer_info[layer_no] = (True, timestamp, layer_timestamp)
@@ -804,6 +808,7 @@ class KVBlockTrie:
             # Should update evict set inside the loop, or when evict_number if large, it will run out of candidates.
             self.add_evict(layer_no)
             evict_node: KVBlockTrieNode = evict_selection_function(layer_no)
+            # print(f"Evicting node {evict_node.id} with color {evict_node.color}")
             assert evict_node is not None
             assert not evict_node.do_not_evict
             assert not evict_node.is_in_evict_heap
@@ -820,7 +825,13 @@ class KVBlockTrie:
                     # Should write.
                     # The evicted block is not in the next layer before.
                     write_to_next_layer.append(evict_node)
+                    # Do not evict again now.
+                    # Cos will mark it later.
+                    evict_node.set_do_not_evict(True)
+                    if evict_node.is_in_evict_heap:
+                        evict_node.remove_from_evict_heap()
                 # Call this even if already inside, to delete from current layer.
+                # Safe to call with inf, inf even if not a write to next layer.
                 already_inside, wno = evict_node.evict_to_lower_location(float("inf"), float("inf"))
                 assert wno == layer_no + 1
             # This is for updating eviction candidates.
@@ -868,6 +879,8 @@ class KVBlockTrie:
         for node in write_to_next_layer:
             # If not, discarded or already in before.
             node.set_storage_layer_info_timestamps(layer_no + 1, write_end_time, write_first_layer_end_time)
+            node.set_do_not_evict(False)
+            node.callback_on_possible_leaf_change()
         
         # Mark freed space.
         # NOTE: used_blocks changed.
