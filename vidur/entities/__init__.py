@@ -5,5 +5,6 @@ from vidur.entities.execution_time import ExecutionTime
 from vidur.entities.replica import Replica
 from vidur.entities.request import Request
 from llmkvb.executor.vidur.vidur.entities.kvstorage import KVStorageController
+from llmkvb.executor.vidur.vidur.entities.cpu import CPU
 
-__all__ = [Request, Replica, Batch, Cluster, BatchStage, ExecutionTime, KVStorageController]
+__all__ = [Request, Replica, Batch, Cluster, BatchStage, ExecutionTime, KVStorageController, CPU]

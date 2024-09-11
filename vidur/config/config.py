@@ -363,6 +363,24 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default=False,
         metadata={"help": "Cache reordering."},
     )
+    quant_kv: bool = field(
+        default=False,
+        metadata={"help": "Quant KV."},
+    )
+    quant_ratio: float = field(
+        default=0.5,
+        metadata={"help": "Quant ratio."},
+    )
+    decode_place: str = field(
+        default="gpu",
+        metadata={"help": "Decode place."},
+    )
+    # Ignore encode speed for now.
+    decode_speed: float = field(
+        default=0.0,
+        metadata={"help": "decode speed."},
+    )
+
 
 
 

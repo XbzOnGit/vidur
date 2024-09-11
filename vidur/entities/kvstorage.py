@@ -5,6 +5,7 @@ from vidur.entities.kv_block_trie import KVBlockTrie, KVBlockTrieNode
 from vidur.entities.base_entity import BaseEntity
 from vidur.entities.communications import Channel
 from vidur.entities.batch import Batch
+from vidur.entities.cpu import CPU
 from vidur.logger import init_logger
 
 logger = init_logger(__name__)
@@ -22,7 +23,7 @@ Always restore before the batch gets to be processed, cos for this batch_stage, 
 class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
                  gpu_write_through_cpu: bool, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, execution_time_predictor, 
-                 pipeline_stage_id: int):
+                 pipeline_stage_id: int, quant_kv: bool, quant_ratio: float, decode_place: str, decode_speed: float):
         # Now always fetch the longest path.
         self._id = KVStorageController.generate_id()
         self._kv_block_trie = KVBlockTrie(layer_pipeline, block_size, num_layers_per_node, 
@@ -62,6 +63,14 @@ class KVStorageController(BaseEntity):
         self._cachedattention_newest_effective_mark = 0
         self._previous_in_cpu_eviction_window = set()
         self._previous_in_disk_eviction_window = set()
+        self._quant_kv = quant_kv
+        self._quant_ratio = quant_ratio
+        self._decode_place = decode_place
+        self._decode_speed = decode_speed
+        if self._quant_kv:
+            if self._decode_speed <= 0:
+                print("WARNING: Decode speed <= 0, now ignore decoding time.")
+        self._cpu = CPU()
         atexit.register(self.dump_stats)
 
     def set_read_buffer_available(self, layer_no, timepoint):
@@ -87,6 +96,7 @@ class KVStorageController(BaseEntity):
     @property
     def scheduler_aware_eviction(self):
         return self._scheduler_aware_eviction
+    
 
 
     def cachedattention_window_update(self, preempted_requests, requests_queue):
@@ -755,6 +765,17 @@ class KVStorageController(BaseEntity):
         end_time, end_firlayer_time, per_layer_preload_time = \
         read_channel.transmit(number_of_blocks_to_preload * self._block_size, 
                               time_to_preload_start, self._num_layers)
+        # TODO: Write another function, enable chunk pipeline and exec for it later.
+        if self._quant_kv:
+            # Add decoding overhead here.
+            assert not self._layer_pipeline
+            if self._decode_place.upper() == "GPU":
+                # decode speed should be given on token number.
+                # Now CHUNKS??!!
+                # TODO: Model chunks, better another function at all, and execute chunk by chunk.
+                # So another exec function as well, do it like layer pipeline but not the same.
+                if self._decode_speed > 0:
+                    end_time += number_of_blocks_to_preload * self._block_size / self._decode_speed
         ready_exec_per_layer = (end_firlayer_time, per_layer_preload_time) if self._layer_pipeline else (end_time, 0.0)
         for node in preload_list:
             assert node.color == 1

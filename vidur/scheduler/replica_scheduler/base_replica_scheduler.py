@@ -11,6 +11,7 @@ from vidur.logger import init_logger
 from vidur.scheduler.replica_stage_scheduler import ReplicaStageScheduler
 from vidur.scheduler.utils.memory_planner import MemoryPlanner
 from vidur.entities import KVStorageController
+import math
 
 from collections import deque
 
@@ -74,7 +75,9 @@ class BaseReplicaScheduler(ABC):
         # per stage.
         space_per_token_per_layer = space_per_token // replica.num_layers
         space_per_block = replica_scheduler_config.block_size * space_per_token
-
+        space_per_block_quantized = None
+        if replica_scheduler_config.quant_kv:
+            space_per_block_quantized = math.ceil(replica_scheduler_config.quant_ratio * space_per_block)
         read_pipeline_buffer = False
         if replica_scheduler_config.cache_lookup_type is not None:
             read_pipeline_buffer = replica_scheduler_config.read_pipeline_buffer
@@ -82,7 +85,17 @@ class BaseReplicaScheduler(ABC):
         if not read_pipeline_buffer:
             read_buffer_fraction = 0.0
         gpu_read_buffer_space = int(available_memory_per_stage * read_buffer_fraction)
+        # FIXME: Leave out some space for decoding/encoding in GPU/CPU.
+
         # Align to block.
+        # NOTE: If decoding in CPU, GPU side is all normal, with full size cached && transmitted.
+        # If decoding in GPU, cache is full size, but transmission is quantized, but need an extra temporary buffer
+        # for the quantized data, then dequantize it.
+        # So here, for either case, do not change read buffer blocks.
+        # Cos for CPU decoding, it still takes that much, allow for that much space.
+        # for GPU decoding, it should take fewer space for those tokens, but need another space for storing dequantized data.
+        # So we can still take it as that much, and read buffer serves as that.
+        # NOTE: Anyway, should not enable them at the same time.
         gpu_read_buffer_blocks = gpu_read_buffer_space // space_per_block
         gpu_read_buffer_space = gpu_read_buffer_blocks * space_per_block
         memory_planner = MemoryPlanner(self._replica_config, replica, gpu_read_buffer_space) # Should not see that part.
@@ -104,52 +117,89 @@ class BaseReplicaScheduler(ABC):
             # FIXME: Now no PP, always stage_id 0 in KVStorageController.
             controller = KVStorageController(replica_scheduler_config.block_size, layer_pipeline, replica.num_layers // num_stages,
                                              read_pipeline_buffer, gpu_write_through_cpu, disk_cpu_prefetch, 
-                                             scheduler_aware_eviction, execution_time_predictor, 0)
+                                             scheduler_aware_eviction, execution_time_predictor, 0, 
+                                             replica_scheduler_config.quant_kv, replica_scheduler_config.quant_ratio, 
+                                             replica_scheduler_config.decode_place, replica_scheduler_config.decode_speed)
             self._replica_kv_controllers.append(controller)
             # Space per token for each stage(each node).
             # Here no per TP, cos considered together.
             available_kv_memory_gpu_per_stage = available_memory_per_stage - param_size_per_device
             num_blocks = int(available_kv_memory_gpu_per_stage // space_per_block)
+            # For GPU, still occupy not quantized space.
             assert num_blocks > 0
             read_thput = 0
             write_thput = 0
+            # NOTE: On quantization, stored in cpu/disk part should be quantized.
+            # stored in gpu should be dequantized.
             if len(replica_scheduler_config.cpu_memory_size) > 0:
                 read_thput = _parse_thput(replica_scheduler_config.cpu_gpu_thput)
                 write_thput = _parse_thput(replica_scheduler_config.gpu_cpu_thput)
             gpu_threshold_block = num_blocks - gpu_read_buffer_blocks
             assert gpu_threshold_block > 0
+            # NOTE: Hack space_per_token_per_layer to adapt to quantization.
+            # One for space, one for channel speed.
+            # Assuming one channel always transmits quantized or dequantized data.
+            # space_per_token_per_layer is used for channel to CPU.
+            # check decode_place to know if to change space_per_token_per_layer here.
+            space_per_token_per_layer_for_channel = space_per_token_per_layer
+            if replica_scheduler_config.quant_kv:
+                if replica_scheduler_config.decode_place.upper() == "CPU":
+                    # With full size between CPU and GPU.
+                    pass
+                else:
+                    assert replica_scheduler_config.decode_place.upper() == "GPU"
+                    space_per_token_per_layer_for_channel = math.ceil(space_per_token_per_layer * replica_scheduler_config.quant_ratio)
+            # NOTE: Now read and write is either all quantized or all dequantized.
             controller.append_layer(num_blocks, read_thput, write_thput, 
                                     replica_scheduler_config.cache_evict_type, 
                                     replica_scheduler_config.cache_evict_op,
                                     gpu_threshold_block, 
-                                    space_per_token_per_layer)
+                                    space_per_token_per_layer_for_channel)
             print(f"About {(num_blocks - gpu_read_buffer_blocks) * replica_scheduler_config.block_size} tokens can be stored in one stage's GPU.\n\n")
             if len(replica_scheduler_config.cpu_memory_size) > 0:
                 layer_of_storage = 2 if len(replica_scheduler_config.disk_size) == 0 else 3
                 cpu_memory_size = _parse_memory_size(replica_scheduler_config.cpu_memory_size)
                 cpu_num_blocks = int(cpu_memory_size // space_per_block)
+                if replica_scheduler_config.quant_kv:
+                    cpu_num_blocks = int(cpu_memory_size // space_per_block_quantized)
                 cpu_sysbuf_fraction = 0.0
                 if replica_scheduler_config.disk_cpu_prefetch:
                     cpu_sysbuf_fraction = replica_scheduler_config.cpu_sysbuf_fraction
                 cpu_sysbuf_space = int(cpu_memory_size * cpu_sysbuf_fraction)
                 cpu_sysbuf_blocks = cpu_sysbuf_space // space_per_block
                 cpu_sysbuf_space = cpu_sysbuf_blocks * space_per_block
+                # This buf is for fetching data from disk, so is quantized.
+                if replica_scheduler_config.quant_kv:
+                    cpu_sysbuf_blocks = int(cpu_sysbuf_space // space_per_block_quantized)
+                    cpu_sysbuf_space = cpu_sysbuf_blocks * space_per_block_quantized
                 cpu_threshold_blocks = cpu_num_blocks - cpu_sysbuf_blocks
                 assert cpu_threshold_blocks > 0
                 assert cpu_num_blocks > 0
                 cpu_evict_op = "discard" if layer_of_storage == 2 else replica_scheduler_config.cache_evict_op
                 cpu_read_thput = 0
                 cpu_write_thput = 0
+                space_per_token_per_layer_for_channel = space_per_token_per_layer
+                if replica_scheduler_config.quant_kv:
+                    space_per_token_per_layer_for_channel = math.ceil(space_per_token_per_layer * replica_scheduler_config.quant_ratio)
+                # Now always quantized between DISK and CPU.
                 if layer_of_storage == 3:
                     cpu_read_thput = _parse_thput(replica_scheduler_config.disk_cpu_thput)
                     cpu_write_thput = _parse_thput(replica_scheduler_config.cpu_disk_thput)
                 print(f"About {(cpu_num_blocks - cpu_sysbuf_blocks) * replica_scheduler_config.block_size} tokens can be stored in one stage's CPU.\n\n")
                 controller.append_layer(cpu_num_blocks, cpu_read_thput, cpu_write_thput, replica_scheduler_config.cache_evict_type, cpu_evict_op, 
-                                        cpu_threshold_blocks, space_per_token_per_layer)
+                                        cpu_threshold_blocks, space_per_token_per_layer_for_channel)
                 if layer_of_storage == 3:
                     disk_size = _parse_memory_size(replica_scheduler_config.disk_size)
                     disk_num_blocks = int(disk_size // space_per_block)
+                    if replica_scheduler_config.quant_kv:
+                        disk_num_blocks = int(disk_size // space_per_block_quantized)
+                        # Still quantized form.
+                        # Even if decoding in CPU, dequantize when GPU needs it.
+                        # Then GPU should require it and CPU decode and transmit(like a longer transmission).
                     assert disk_num_blocks > 0
+                    space_per_token_per_layer_for_channel = space_per_token_per_layer
+                    if replica_scheduler_config.quant_kv:
+                        space_per_token_per_layer_for_channel = math.ceil(space_per_token_per_layer * replica_scheduler_config.quant_ratio)
                     controller.append_layer(disk_num_blocks, 0, 0, replica_scheduler_config.cache_evict_type, 
                                             "discard", disk_num_blocks, space_per_token_per_layer)
                     print(f"About {disk_num_blocks * replica_scheduler_config.block_size} tokens can be stored in one stage's Disk.\n\n")
