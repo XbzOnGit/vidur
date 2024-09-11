@@ -876,3 +876,6 @@ class KVStorageController(BaseEntity):
         # Record hit.
         hit_trace: List[KVBlockTrieNode] = self._kv_block_trie.lookup(kvblock_list, timestamp)
         return hit_trace
+    
+    def locality_check(self, request):
+        return (len(self.lookup(request, -1.0)) - 1) * self._block_size

@@ -344,3 +344,12 @@ class BaseReplicaScheduler(ABC):
     
     def check_if_scheduler_aware_eviction_in_cachedattention(self):
         return any([controller.scheduler_aware_eviction for controller in self._replica_kv_controllers])
+
+    
+    def locality_check(self, request: Request):
+        # Check if the request is in the cache.
+        if self._config.cache_lookup_type is None:
+            return 0
+        # NOTE: Now check by min.
+        return min([controller.locality_check(request) for controller in self._replica_kv_controllers 
+                    if controller is not None])

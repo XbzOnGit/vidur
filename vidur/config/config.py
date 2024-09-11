@@ -612,7 +612,16 @@ class LORGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
     @staticmethod
     def get_type():
         return GlobalSchedulerType.LOR
-
+    
+@dataclass 
+class LocalityGlobalSchedulerConfig(BaseGlobalSchedulerConfig):
+    @staticmethod
+    def get_type():
+        return GlobalSchedulerType.LOCALITY
+    threshold_of_imbanlance_ratio: float = field(
+        default=2.0,# Max pending / min pending.
+        metadata={"help": "Threshold of imbalance ratio."},
+    )
 
 @dataclass
 class BaseExecutionTimePredictorConfig(BasePolyConfig):
