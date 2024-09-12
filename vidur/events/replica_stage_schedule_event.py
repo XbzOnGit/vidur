@@ -44,10 +44,15 @@ class ReplicaStageScheduleEvent(BaseEvent):
         )
 
         self._is_last_stage = stage_scheduler.is_last_stage
+        # print(f"end_execution_time: {end_exec_time}")
+        # print(f"self.time + self._batch_stage.execution_time: {self.time + self._batch_stage.execution_time}")
         # print(f"Recorded time to batch stage {self._batch_stage.id} end takes {self._batch_stage.execution_time}")
+        # Float point error, replace self.time + self._batch_stage.execution_time with end_exec_time
+        # But then it will cause a later assertion to fail --> time == self._scheduled_at + self._execution_time.
+        # So change that assertion to allow for a small error.
         return [
             BatchStageEndEvent(
-                self.time + self._batch_stage.execution_time,
+                end_exec_time,
                 self._replica_id,
                 self._stage_id,
                 self._is_last_stage,

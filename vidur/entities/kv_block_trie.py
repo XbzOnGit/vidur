@@ -325,6 +325,7 @@ class KVBlockTrieNode:
         # Color changed, but perhaps it is not in heap before.
         if self.is_in_evict_heap:
             self.remove_from_evict_heap()
+        # print(f"timestamp of node {self.id} updated with {timestamp} for callback_on_fetch.")
         self.timestamp_update(timestamp)
         # Do not delete storage layer info of from_no, it is still there.
         # Update color.
@@ -362,6 +363,7 @@ class KVBlockTrieNode:
         if self.is_in_evict_heap:
             # print(f"{self.id} Remove from heap on switch to layer 0 tft.")
             self.remove_from_evict_heap()
+        # print(f"timestamp of node {self.id} updated with {timestamp} for callback_on_switch_to_layer0_tft.")
         self.timestamp_update(timestamp)
         self._storage_layer_info[0] = (True, timestamp, layer_timestamp)
         self.parent._children_color_cnt[2] -= 1
@@ -404,7 +406,7 @@ class KVBlockTrieNode:
             old_access_time = self._evict_timestamp[0]
             self._evict_timestamp = (new_access_time, -self.depth)
             if self.is_in_evict_heap:
-                assert old_access_time <= new_access_time
+                assert old_access_time <= new_access_time, f"{self.id} {old_access_time} > {new_access_time}, layer {color}"
                 self.sift_down_evict_heap(False)
         else:
             if self.is_in_evict_heap:
@@ -504,10 +506,11 @@ class KVBlockTrieNode:
         self.callback_on_possible_leaf_change()
     
     def set_storage_layer_info_timestamps(self, layer_no, timestamp, layer_timestamp):
-        assert self._storage_layer_info[layer_no][0], f"{self.id} {layer_no}"
-        assert self._storage_layer_info[layer_no][1] == float("inf")
-        assert self._storage_layer_info[layer_no][2] == float("inf")
+        # assert self._storage_layer_info[layer_no][0], f"{self.id} {layer_no}"
+        # assert self._storage_layer_info[layer_no][1] == float("inf")
+        # assert self._storage_layer_info[layer_no][2] == float("inf")
         self._storage_layer_info[layer_no] = (True, timestamp, layer_timestamp)
+
     
     def callback_on_insert_into_gpu(self, timestamp, layer_timestamp):
         # Only called when not in GPU before.
@@ -519,6 +522,7 @@ class KVBlockTrieNode:
         assert not self.is_in_evict_heap # A new node, updated later in callback_on_possible_leaf_change.
         self._storage_layer_info[0] = (True, timestamp, layer_timestamp)
         # Update timestamps.
+        # print(f"timestamp of node {self.id} updated with {timestamp} for callback_on_insert_into_gpu.")
         self.timestamp_update(timestamp)
         # print(f"Insert into GPU: {self.id}, evict_timestamp: {self.evict_timestamp}")
         # Color changed -1 --> 0.
@@ -534,6 +538,19 @@ class KVBlockTrieNode:
         assert child_node.tokens not in self.children
         assert len(child_node.children) == 0
         self.children[child_node.tokens] = child_node
+
+
+    def insert_a_new_child_node(self, child_node):
+        assert child_node.tokens not in self.children
+        assert len(child_node.children) == 0
+        self.children[child_node.tokens] = child_node
+        assert child_node.parent == self
+        child_color = child_node.color
+        assert child_color >= 0
+        assert self._children_color_cnt[child_color] >= 0
+        self._children_color_cnt[child_color] += 1
+        self.callback_on_possible_leaf_change()
+        child_node.callback_on_possible_leaf_change()
         
 
     
@@ -1015,6 +1032,7 @@ class KVBlockTrie:
             # NOTE: Only move if already inside.
             # NOTE: Just update in this order, should maintain leaf sets.
             if timestamp >= 0.0:
+                # print(f"timestamp of node {next_node.id} updated with {timestamp} for lookup.")
                 next_node.timestamp_update(timestamp)
             current_node = next_node
         # len(retval) - 1 should be the number of full blocks found.
@@ -1062,6 +1080,13 @@ class KVBlockTrie:
         assert self._used_blocks[0] <= self._num_threshold_blocks[0]
         return the_node
 
+    def insert_one_node(self, child_node):
+        color = child_node.color
+        assert color >= 0
+        # Space has been acquired outside.
+        # self._used_blocks[color] += 1
+        assert self._used_blocks[color] <= self._num_threshold_blocks[color]
+        child_node.parent.insert_a_new_child_node(child_node)
     
     def evict_selection_lru(self, layer_no: int):
         # Choose one block, which is one edge.

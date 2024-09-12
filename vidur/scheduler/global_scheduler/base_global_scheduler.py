@@ -7,7 +7,15 @@ from vidur.execution_time_predictor import ExecutionTimePredictorRegistry
 from vidur.scheduler.replica_scheduler.replica_scheduler_registry import (
     ReplicaSchedulerRegistry,
 )
-
+def _parse_thput(thput_str: str) -> float:
+    thput_str = thput_str.upper()
+    if thput_str.endswith("GB/S"):
+        return float(thput_str[:-4]) * 1024**3
+    if thput_str.endswith("MB/S"):
+        return float(thput_str[:-4]) * 1024**2
+    if thput_str.endswith("KB/S"):
+        return float(thput_str[:-4]) * 1024
+    return float(thput_str)
 
 class BaseGlobalScheduler(ABC):
     def __init__(self, config: SimulationConfig, replicas: Dict[int, Replica]):
@@ -35,6 +43,10 @@ class BaseGlobalScheduler(ABC):
             )
             for replica_id, replica in replicas.items()
         }
+        if len(config.cluster_config.p2p_bandwidth_between_nodes) > 0:
+            p2p_bandwidth = _parse_thput(config.cluster_config.p2p_bandwidth_between_nodes)
+            for replica_scheduler in self._replica_schedulers.values():
+                replica_scheduler.set_other_replicas(self._replica_schedulers, p2p_bandwidth)
         self._request_queue = []
 
     def sort_requests(self) -> None:

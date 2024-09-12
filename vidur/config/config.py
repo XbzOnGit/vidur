@@ -368,7 +368,7 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         metadata={"help": "Quant KV."},
     )
     quant_ratio: float = field(
-        default=0.5,
+        default=0.25,
         metadata={"help": "Quant ratio."},
     )
     decode_place: str = field(
@@ -378,7 +378,7 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
     # Ignore encode speed for now.
     decode_speed: float = field(
         default=0.0,
-        metadata={"help": "decode speed."},
+        metadata={"help": "decode speed in tokens per second."},
     )
 
 
@@ -744,6 +744,10 @@ class ClusterConfig:
     num_replicas: int = field(
         default=1,
         metadata={"help": "Number of replicas."},
+    )
+    p2p_bandwidth_between_nodes: str = field(
+        default="",
+        metadata={"help": "P2P bandwidth between nodes."},
     )
     replica_config: ReplicaConfig = field(default_factory=ReplicaConfig)
     global_scheduler_config: BaseGlobalSchedulerConfig = field(

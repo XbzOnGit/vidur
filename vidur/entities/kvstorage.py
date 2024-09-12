@@ -23,7 +23,8 @@ Always restore before the batch gets to be processed, cos for this batch_stage, 
 class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
                  gpu_write_through_cpu: bool, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, execution_time_predictor, 
-                 pipeline_stage_id: int, quant_kv: bool, quant_ratio: float, decode_place: str, decode_speed: float):
+                 pipeline_stage_id: int, quant_kv: bool, quant_ratio: float, decode_place: str, decode_speed: float, 
+                 self_replica_id: int, space_per_token_per_layer_before_quant: int):
         # Now always fetch the longest path.
         self._id = KVStorageController.generate_id()
         self._kv_block_trie = KVBlockTrie(layer_pipeline, block_size, num_layers_per_node, 
@@ -71,6 +72,10 @@ class KVStorageController(BaseEntity):
             if self._decode_speed <= 0:
                 print("WARNING: Decode speed <= 0, now ignore decoding time.")
         self._cpu = CPU()
+        self._self_replica_id = self_replica_id
+        self._from_other_replica_to_channel = {}
+        self._space_per_token_per_layer_before_quant = space_per_token_per_layer_before_quant
+        self._move_across_nodes = False
         atexit.register(self.dump_stats)
 
     def set_read_buffer_available(self, layer_no, timepoint):
@@ -179,8 +184,6 @@ class KVStorageController(BaseEntity):
         # It should execute and issue writes layer by layer.
         # batch_stage_end should restore.
 
-
-        # TODO: Add support for disk, now it's not the same with CachedAttention.
         # print(f"On batch_stage timestamp: {timestamp}")
         hit_traces = []
         pgdsf_alpha_beta_info = []
@@ -194,11 +197,33 @@ class KVStorageController(BaseEntity):
         end_first_layer_of_already_in_gpu = None
         bidx = 0
         max_arrival_time = max([request.arrived_at for request in batch_to_hack.requests])
+        end_fetch_disk_and_remote_time = None
         for request in batch_to_hack.requests:
             self._map_from_reqid_to_request[request.id] = request
             # print(f"\nRequest {request.id} starts to be hacked.")
             hit_trace: List[KVBlockTrieNode] = self.lookup(request, timestamp)
             hit_traces.append(hit_trace)
+            for hit in hit_trace[1:]:
+                hit.set_do_not_evict(True)
+                if hit.is_in_evict_heap:
+                    # Pin them.
+                    hit.remove_from_evict_heap()
+            if self._move_across_nodes:
+                max_hit_token_length, max_hit_replica = self._lookup_other_replicas(request)
+                assert max_hit_token_length % self._block_size == 0
+                # FIXME: Currently still all blocks.
+                max_others_block_num = max_hit_token_length // self._block_size
+                original_block_num = len(hit_trace) - 1
+                if max_others_block_num > original_block_num:
+                    # Need to fetch more.
+                    add_blocks, end_two_fetch_time = self._fetch_disk_fetch_insert_remote(max_hit_replica, request, original_block_num, 
+                                                         max_others_block_num, timestamp, hit_trace[-1])
+                    # Channel will naturally accumulate end_two_fetch time in a correct way.
+                    # Then just select the max.
+                    if end_fetch_disk_and_remote_time is None or end_two_fetch_time > end_fetch_disk_and_remote_time:
+                        end_fetch_disk_and_remote_time = end_two_fetch_time
+                    hit_trace.extend(add_blocks)
+
             # Should forever be enough space on GPU for replica scheduler to guarantee.
             for hit in hit_trace[1:]:
                 # Just preload first.
@@ -225,6 +250,8 @@ class KVStorageController(BaseEntity):
                         end_first_layer_of_already_in_gpu = complete_firlay_time
                     # This is because the preload of this batch should be together
                     # And preload of last batch should be done before this batch cos it is before execution of last batch.
+                # It is pinned twice, once before fetching remote.
+                # But in that process, some NEW blocks are created.
                 hit.set_do_not_evict(True)
                 if hit.is_in_evict_heap:
                     # Pin them.
@@ -303,12 +330,23 @@ class KVStorageController(BaseEntity):
         synced_to_mem_end_time = timestamp
         synced_to_mem_fir_time = timestamp
         synced_to_mem_per_layer_time = 0.0
+        if self._move_across_nodes:
+            if end_fetch_disk_and_remote_time is not None:
+                # Must be a real remote fetch.
+                # Can be > 0, cos only those remote has benefits, I fetch disk blocks together.
+                # assert len(synced_fetch_from_disk_to_memory_list) == 0
+                synced_to_mem_end_time = end_fetch_disk_and_remote_time
+                synced_to_mem_fir_time = end_fetch_disk_and_remote_time
+                synced_to_mem_per_layer_time = 0.0
+            # Cos should have been fetched in previous function.
         if not self._disk_cpu_prefetch:
-            synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.synced_fetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, timestamp)
+            if len(synced_fetch_from_disk_to_memory_list) > 0:
+                synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.synced_fetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, timestamp)
         # Update timestamp cos it is synced, just as if time is passed there.
         else:
             # print(f"max arrival time is {max_arrival_time}, while timestamp is {timestamp}")
-            synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.oracle_prefetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, max_arrival_time, 
+            if len(synced_fetch_from_disk_to_memory_list) > 0:
+                synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.oracle_prefetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, max_arrival_time, 
                                                                  timestamp)
 
         # FIXME: Now launch eviction for active blocks together with preload blocks.
@@ -427,7 +465,16 @@ class KVStorageController(BaseEntity):
         batch_to_hack.set_restore_between_stages(kv_hit_length_list, num_processed_tokens_list, should_reset_prefill_complete_list, batch_num_tokens_list, new_full_blocks_list)
         return ready_exec_per_layer, new_full_blocks_list
 
+    def set_other_replicas(self, other_replicas, p2p_bandwidth_between_nodes):
+        # Replica: Channel
+        self._move_across_nodes = True
+        space_per_token_per_layer_after_quant = self._space_per_token_per_layer_before_quant if not self._quant_kv else \
+        self._space_per_token_per_layer_before_quant * self._quant_ratio
+        for replica_id, replica in other_replicas.items():
+            if replica_id != self._self_replica_id:
+                self._from_other_replica_to_channel[replica] = Channel(p2p_bandwidth_between_nodes, space_per_token_per_layer_after_quant)
 
+            
 
     # Called on restart or completion of a request.
     def remove_request_from_active_blocks(self, reqid):
@@ -531,6 +578,7 @@ class KVStorageController(BaseEntity):
             # Preaccess only when inside heap, to pin it.
             if the_node.is_in_evict_heap:
                 # If inside evict heap, need to pin it.
+                # print(f"timestamp of node {the_node.id} updated with {timestamp} for CPU filter write.")
                 the_node.timestamp_update(timestamp)
         return new_list
     
@@ -648,6 +696,7 @@ class KVStorageController(BaseEntity):
         number_of_blocks_to_preload = len(preload_list)
         if number_of_blocks_to_preload == 0:
             # Note that this means synced from disk to mem must also be 0.
+            # And no fetch from remote.
             assert synced_to_mem_end_time == timestamp
             assert synced_to_mem_fir_time == timestamp
             assert synced_to_mem_per_layer_time == 0.0
@@ -785,14 +834,17 @@ class KVStorageController(BaseEntity):
         return ready_exec_per_layer, end_time
     
 
-    def synced_fetch_from_disk_to_memory(self, synced_fetch_from_disk_to_memory_list: List[KVBlockTrieNode], timestamp: float):
+    def synced_fetch_from_disk_to_memory(self, synced_fetch_from_disk_to_memory_list: List[KVBlockTrieNode], timestamp: float, 
+                                         no_acquire_space: bool = False):
         # self._kv_block_trie.check_size_consistency()
         number_of_blocks_to_synced_to_memory = len(synced_fetch_from_disk_to_memory_list)
         if number_of_blocks_to_synced_to_memory == 0:
-            return timestamp, timestamp, 0.0
-        evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(1, 
-                                                                                                        number_of_blocks_to_synced_to_memory, 
-                                                                                                        timestamp, False, False)
+            return timestamp, timestamp, 0.
+        evict_end_time = timestamp
+        if not no_acquire_space:
+            evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(1, 
+                                                                                                            number_of_blocks_to_synced_to_memory, 
+                                                                                                            timestamp, False, False)
         wait_for_present_on_disk_end_time = timestamp
         for node in synced_fetch_from_disk_to_memory_list:
             assert node.color == 2
@@ -866,9 +918,27 @@ class KVStorageController(BaseEntity):
         # self._kv_block_trie.check_size_consistency()
         return fetch_end_time, fetch_firlayer_time, per_layer_fetch_time
     
+    def _lookup_other_replicas(self, request):
+        # Find the longest trace from other replicas.
+        max_hit_token_length = -1
+        max_hit_replica = None
+        # print(f"Replicas: {self._replicas}")
+        for replica_scheduler in self._from_other_replica_to_channel.keys():
+            assert replica_scheduler.replica_id != self._self_replica_id
+            # NOTE: Currently do not update timestamps of other replicas.
+            # NOTE: locality_check should return a length of hit tokens.
+            hit_token_length = replica_scheduler.locality_check(request)
+            if hit_token_length > max_hit_token_length:
+                max_hit_token_length = hit_token_length
+                max_hit_replica = replica_scheduler
+        return max_hit_token_length, max_hit_replica
+                
+    # FIXME: Now there's a hole for cachegen.
+    # FIXME: Use a channel, which will naturally show the congestion between requests, when no pipeline.
     def lookup(self, request, timestamp):
-        if request.num_processed_tokens % self._block_size != 0:
-            assert request.id in self._active_blocks
+        # Can be remote.
+        # if request.num_processed_tokens % self._block_size != 0:
+        #     assert request.id in self._active_blocks
         number_of_tokens_to_lookup = max(request.num_processed_tokens, request.num_prefill_tokens)
         number_of_blocks_to_lookup = number_of_tokens_to_lookup // self._block_size
         kvblock_list = request.full_kvblocks[:number_of_blocks_to_lookup]
@@ -879,3 +949,67 @@ class KVStorageController(BaseEntity):
     
     def locality_check(self, request):
         return (len(self.lookup(request, -1.0)) - 1) * self._block_size
+    
+
+    # FIXME: Now assuming that network card can read from DISK && CPU && GPU, at the same speed.
+    # Or if a write through is enabled, it should read from CPU && DISK.
+    # NOTE: Return a list and a timestamp that the blocks for this request can be used.
+    # NOTE: Should be called after all blocks local fetched synced / prefetched.
+    def _fetch_disk_fetch_insert_remote(self, replica_to_fetch, request, 
+                                                     original_block_num, next_block_num, timestamp, last_local_hit_node):
+        assert self._move_across_nodes
+        # NOTE: Currently does not support this.
+        # FIXME: Now no prefetch for this, always synced fetch.
+        assert not self._disk_cpu_prefetch
+        assert original_block_num >= 0
+        remote_fetch_block_num = next_block_num - original_block_num
+        assert remote_fetch_block_num > 0
+        # Get disk blocks to fetch.
+        reverse_disk_fetch_list = []
+        temp_node = last_local_hit_node
+        while temp_node != self._kv_block_trie.root and temp_node.color == 2:
+            reverse_disk_fetch_list.append(temp_node)
+            temp_node = temp_node.parent
+        reverse_disk_fetch_list.reverse()
+        needed_blocks = len(reverse_disk_fetch_list) + remote_fetch_block_num
+        # Acquire space for both disk fetch and remote fetch.
+        make_space_end_time, _, _ = self._kv_block_trie.synced_acquire_space(1, 
+                                                                             needed_blocks, 
+                                                                             timestamp,
+                                                                             False,
+                                                                             False)
+        # FIXME: Now always wait until ALL space available then fetch.
+        # Fetch from disk.
+        end_fetch_disk_time, end_fetch_disk_fir, end_fetch_disk_per = self.synced_fetch_from_disk_to_memory(
+            reverse_disk_fetch_list, make_space_end_time, True)
+        # Fetch from remote.
+        read_channel: Channel = self._from_other_replica_to_channel[replica_to_fetch]
+        assert read_channel is not None
+        end_network_fetch_time, _, _ = read_channel.transmit(remote_fetch_block_num * self._block_size, 
+                                                             make_space_end_time, self._num_layers)
+        last_virtual_block = last_local_hit_node
+        last_depth = last_virtual_block.depth
+        start_idx = original_block_num * self._block_size
+        add_blocks = []
+        # FIXME: Should check when that block is available on remote node, which can introduce some overhead.
+        # Need another interface other than locality_check. Should know a timestamp to use it.
+
+        # FIXME: If the remote block is not in CPU.
+        for _ in range(remote_fetch_block_num):
+            new_node = KVBlockTrieNode(last_virtual_block, tuple(request.tokens[start_idx:start_idx + self._block_size]), \
+                                       self._kv_block_trie, last_depth + 1)
+            last_depth += 1
+            start_idx += self._block_size
+            last_virtual_block = new_node
+            # Set node property on evict timestamp && storage layer info.
+            # NOTE: Transmission here might not be by layer.
+            # Like in cachegen, it is by chunk of token(in token dimension), so fir layer is end of all.
+            new_node.set_storage_layer_info_timestamps(1, end_network_fetch_time, end_network_fetch_time)
+            # print(f"timestamp of node {new_node.id} updated with {timestamp} for remote fetch.")
+            new_node.timestamp_update(timestamp)
+            # After this, next time it will be a local hit.
+            self._kv_block_trie.insert_one_node(new_node)
+            add_blocks.append(new_node)
+
+        self._kv_block_trie.add_insert(1, remote_fetch_block_num)
+        return add_blocks, max(end_fetch_disk_time, end_network_fetch_time)

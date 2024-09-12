@@ -173,6 +173,10 @@ class ReplicaStageScheduler:
         # TODO: Check total execution time here.
         total_execution_time = end_execution_time - timestamp
         model_execution_time = execution_time.model_time
+        # batch_stage.execution_time = total_execution_time = end_execution_time - timestamp
+        # So in the end, batch stage end arrivals at end_execution_time - timestamp + timestamp
+        # But float point error can cause trouble here, the next assertion might fail.
+        # assert total_execution_time + timestamp == end_execution_time, f"{total_execution_time} + {timestamp} != {end_execution_time}"
         batch_stage = BatchStage(
             batch.id,
             self._replica_id,

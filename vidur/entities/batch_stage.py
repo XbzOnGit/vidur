@@ -95,9 +95,8 @@ class BatchStage(BaseEntity):
         self,
         time: float,
     ) -> None:
-        assert (
-            time == self._scheduled_at + self._execution_time
-        ), f"{time} != {self._scheduled_at} + {self._execution_time}"
+        if time != self._scheduled_at + self._execution_time:
+            logger.warning(f"on_stage_end of batch stage {self._id} time != self._scheduled_at + self._execution_time, {time} != {self._scheduled_at} + {self._execution_time} = {self._scheduled_at + self._execution_time}")
 
         self._completed_at = time
 

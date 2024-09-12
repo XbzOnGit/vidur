@@ -119,7 +119,8 @@ class BaseReplicaScheduler(ABC):
                                              read_pipeline_buffer, gpu_write_through_cpu, disk_cpu_prefetch, 
                                              scheduler_aware_eviction, execution_time_predictor, 0, 
                                              replica_scheduler_config.quant_kv, replica_scheduler_config.quant_ratio, 
-                                             replica_scheduler_config.decode_place, replica_scheduler_config.decode_speed)
+                                             replica_scheduler_config.decode_place, replica_scheduler_config.decode_speed, 
+                                             self._replica_id, space_per_token_per_layer)
             self._replica_kv_controllers.append(controller)
             # Space per token for each stage(each node).
             # Here no per TP, cos considered together.
@@ -241,6 +242,16 @@ class BaseReplicaScheduler(ABC):
             )
             for stage_id in range(num_stages)
         }
+        # This includes itself.
+
+    def set_other_replicas(self, replica_schedulers, p2p_bandwidth):
+        assert replica_schedulers is not None
+        assert p2p_bandwidth is not None
+        self._other_replicas = replica_schedulers
+        self._p2p_bandwidth_between_nodes = p2p_bandwidth
+        for controller in self._replica_kv_controllers:
+            if controller is not None:
+                controller.set_other_replicas(replica_schedulers, p2p_bandwidth)
 
     @property
     def num_pending_requests(self) -> int:
@@ -345,7 +356,7 @@ class BaseReplicaScheduler(ABC):
     def check_if_scheduler_aware_eviction_in_cachedattention(self):
         return any([controller.scheduler_aware_eviction for controller in self._replica_kv_controllers])
 
-    
+    # Should return a token length.
     def locality_check(self, request: Request):
         # Check if the request is in the cache.
         if self._config.cache_lookup_type is None:
