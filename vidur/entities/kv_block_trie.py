@@ -65,6 +65,7 @@ class KVBlockTrieNode:
         self._evict_timestamp = (-1, -self.depth)
 
         # FIXME: Currently at most 3 layers.
+        # (is_present, timestamp, first_layer_timestamp)
         self._storage_layer_info = [(False, -1.0, -1.0), (False, -1.0, -1.0), (False, -1.0, -1.0)]
         self._children_color_cnt = [0, 0, 0]
 
@@ -821,6 +822,9 @@ class KVBlockTrie:
         write_to_next_layer: List[KVBlockTrieNode] = []
         evicted_nodes = []
         # callback on evict: Heap update && color info && leaf info of parent && evict candidates of parent and self.
+        max_end_original_present_next_layer_time = 0.0
+        max_fir_original_present_next_layer_time = 0.0
+        max_original_present_next_layer_interval = 0.0
         for _ in range(evict_number):
             # Should update evict set inside the loop, or when evict_number if large, it will run out of candidates.
             self.add_evict(layer_no)
@@ -847,6 +851,13 @@ class KVBlockTrie:
                     evict_node.set_do_not_evict(True)
                     if evict_node.is_in_evict_heap:
                         evict_node.remove_from_evict_heap()
+                else:
+                    end_next, fir_next = evict_node.get_ready_time(layer_no + 1)
+                    max_end_original_present_next_layer_time = max(max_end_original_present_next_layer_time, end_next)
+                    max_fir_original_present_next_layer_time = max(max_fir_original_present_next_layer_time, fir_next)
+                    assert self._num_layers > 0
+                    next_interval = (end_next - fir_next) / (self._num_layers - 1) if self._num_layers > 1 else 0.0
+                    max_original_present_next_layer_interval = max(max_original_present_next_layer_interval, next_interval)
                 # Call this even if already inside, to delete from current layer.
                 # Safe to call with inf, inf even if not a write to next layer.
                 already_inside, wno = evict_node.evict_to_lower_location(float("inf"), float("inf"))
@@ -906,7 +917,10 @@ class KVBlockTrie:
         # self.check_size_consistency()
         # for i in range(self.num_storage_layers):
         #     self._get_size(i)
-        return write_end_time, write_first_layer_end_time, write_per_layer_time_interval
+        space_av_end_time = max(write_end_time, max_end_original_present_next_layer_time)
+        space_av_first_layer_end_time = max(write_first_layer_end_time, max_fir_original_present_next_layer_time)
+        space_av_per_layer_time_interval = max(write_per_layer_time_interval, max_original_present_next_layer_interval)
+        return space_av_end_time, space_av_first_layer_end_time, space_av_per_layer_time_interval
     
     def available_blocks(self, layer_no: int):
         return self._num_threshold_blocks[layer_no] - self._used_blocks[layer_no]
