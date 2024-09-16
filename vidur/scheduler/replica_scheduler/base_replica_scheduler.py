@@ -70,6 +70,8 @@ class BaseReplicaScheduler(ABC):
         print(f"cache_evict_type: {replica_scheduler_config.cache_evict_type}")
         print(f"cache_evict_op: {replica_scheduler_config.cache_evict_op}")
         print(f"cache_reordering: {self._cache_reordering}")
+        print(f"quant_kv: {replica_scheduler_config.quant_kv}")
+        print(f"Allow reordered KV blocks: {replica_scheduler_config.allow_reorder_kv_blocks}")
         print(f"space per token on one stage: {(2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages}")
         space_per_token = (2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages
         print(f"Model attention head dim: {replica.attention_head_dim}")
@@ -123,7 +125,7 @@ class BaseReplicaScheduler(ABC):
                                              scheduler_aware_eviction, execution_time_predictor, 0, 
                                              replica_scheduler_config.quant_kv, replica_scheduler_config.quant_ratio, 
                                              replica_scheduler_config.decode_place, replica_scheduler_config.decode_speed, 
-                                             self._replica_id, space_per_token_per_layer)
+                                             self._replica_id, space_per_token_per_layer, replica_scheduler_config.allow_reorder_kv_blocks)
             self._replica_kv_controllers.append(controller)
             # Space per token for each stage(each node).
             # Here no per TP, cos considered together.

@@ -1,6 +1,6 @@
 from typing import List, Tuple
-import heapq
 from vidur.entities.communications import Channel
+from vidur.utils.heap import Heap
 import atexit
 
 
@@ -23,8 +23,6 @@ class KVBlock:
         return len(self.tokens)
 
 general_kv_block_size = None
-
-# TODO: Add some way to pin it to some layer(more than refcnt which prevents discarding).
 
 # 1. Always make refcnt > 0 for RUNNING requests full blocks of kV cache.
 # It should even go into lower layers, remember to add_ref when inserting blocks, even if duplicated.
@@ -80,6 +78,8 @@ class KVBlockTrieNode:
         self._cachedattention_in_disk_eviction_window = -1
         self._cachedattention_in_cpu_eviction_window = -1
 
+        self._position_in_reorder_kv_heap = -1
+
 
         self._tokens_parent_to_here = tokens_parent_to_here
         self._kvtrie: KVBlockTrie = kvtrie
@@ -129,6 +129,9 @@ class KVBlockTrieNode:
     @property
     def is_leaf(self):
         # Color of itself && color of children.
+        if self._kvtrie.allow_reorder_kv_blocks:
+            # Any node is leaf, allow eviction.
+            return True
         color = self.color
         # [0, color]
         i = 0
@@ -315,12 +318,47 @@ class KVBlockTrieNode:
                     # print(f"{self.id} Add to heap on is leaf.")
                     self.add_self_to_evict_heap()
 
+    def modify_reorder_kv_heap_on_color_change(self):
+        if self._kvtrie.block_tokens_to_nodes is not None:
+            if self._position_in_reorder_kv_heap >= 0:
+                the_heap_of_reorder: Heap = self._kvtrie.block_tokens_to_nodes[self.tokens]
+                the_heap_of_reorder.modify_heap(self)
+
+    def pop_self_from_reorder_kv_heap_on_evict_to_discard(self):
+        if self._kvtrie.block_tokens_to_nodes is not None:
+            assert self._position_in_reorder_kv_heap >= 0
+            the_heap_of_reorder: Heap = self._kvtrie.block_tokens_to_nodes[self.tokens]
+            the_heap_of_reorder.delete(self)
+            # Even clear the heap.
+            if the_heap_of_reorder.size() == 0:
+                del self._kvtrie.block_tokens_to_nodes[self.tokens]
+
+    def assert_inside_reorder_kv_heap(self):
+        if self._kvtrie.block_tokens_to_nodes is not None:
+            assert self._position_in_reorder_kv_heap >= 0
+    
+    def check_if_inside_reorder_kv_heap(self):
+        if self._kvtrie.block_tokens_to_nodes is not None:
+            return self._position_in_reorder_kv_heap >= 0
+        return False
+
+    def insert_into_reorder_kv_heap(self):
+        if self._kvtrie.block_tokens_to_nodes is not None:
+            if self.tokens not in self._kvtrie.block_tokens_to_nodes:
+                self._kvtrie.block_tokens_to_nodes[self.tokens] = Heap("color", "_position_in_reorder_kv_heap")
+            the_heap_of_reorder: Heap = self._kvtrie.block_tokens_to_nodes[self.tokens]
+            the_heap_of_reorder.insert(self)
+
+    
+
     # Interal states on evictions, color, leaves.
     def callback_on_fetch(self, from_no: int, to_no: int, timestamp, layer_timestamp):
         assert from_no == to_no + 1
         assert self._storage_layer_info[from_no][0]
         assert not self._storage_layer_info[to_no][0]
         assert self.color == from_no # Should only be called when needing a fetch.
+        assert self.color >= 0
+        self.assert_inside_reorder_kv_heap() # Do not insert
         # Anyway, need to remove from evict list of from_no layer cos color changed.
         # print(f"{self.id} Remove from heap on fetch from {from_no} to {to_no}.")
         # Color changed, but perhaps it is not in heap before.
@@ -331,6 +369,8 @@ class KVBlockTrieNode:
         # Do not delete storage layer info of from_no, it is still there.
         # Update color.
         self._storage_layer_info[to_no] = (True, timestamp, layer_timestamp)
+        # NOTE: Color can change.
+        self.modify_reorder_kv_heap_on_color_change()
         # print(f"{self.id}: {self._storage_layer_info}")
         # print(f"Parent ID is {self.parent.id}")
         # print(f"Parent color is {self.parent.color}")
@@ -367,6 +407,11 @@ class KVBlockTrieNode:
         # print(f"timestamp of node {self.id} updated with {timestamp} for callback_on_switch_to_layer0_tft.")
         self.timestamp_update(timestamp)
         self._storage_layer_info[0] = (True, timestamp, layer_timestamp)
+        # NOTE: Color can change.
+        if not self.check_if_inside_reorder_kv_heap():
+            self.insert_into_reorder_kv_heap()
+        else:
+            self.modify_reorder_kv_heap_on_color_change()
         self.parent._children_color_cnt[2] -= 1
         assert self.parent._children_color_cnt[2] >= 0
         assert self.parent._children_color_cnt[0] >= 0
@@ -384,7 +429,10 @@ class KVBlockTrieNode:
             assert self._storage_layer_info[to_no][1] <= timestamp
             assert self._storage_layer_info[to_no][2] <= layer_timestamp
         else:
+            color_before = self.color
             self._storage_layer_info[to_no] = (True, timestamp, layer_timestamp)
+            color_after = self.color
+            assert color_before == color_after
             # No color change.
             # So no leaf change.
     
@@ -495,6 +543,10 @@ class KVBlockTrieNode:
             assert self._storage_layer_info[to_no][2] <= layer_timestamp
         else:
             self._storage_layer_info[to_no] = (True, timestamp, layer_timestamp)
+        if not self.check_if_inside_reorder_kv_heap():
+            self.insert_into_reorder_kv_heap()
+        # NOTE: Color can change.
+        self.modify_reorder_kv_heap_on_color_change()
         # Even if already inside, still color change.
         # Color changed from_no --> to_no(increased).
         self.parent._children_color_cnt[from_no] -= 1
@@ -511,6 +563,10 @@ class KVBlockTrieNode:
         # assert self._storage_layer_info[layer_no][1] == float("inf")
         # assert self._storage_layer_info[layer_no][2] == float("inf")
         self._storage_layer_info[layer_no] = (True, timestamp, layer_timestamp)
+        if not self.check_if_inside_reorder_kv_heap():
+            self.insert_into_reorder_kv_heap()
+        # NOTE: Color can change.
+        self.modify_reorder_kv_heap_on_color_change()
 
     
     def callback_on_insert_into_gpu(self, timestamp, layer_timestamp):
@@ -522,6 +578,10 @@ class KVBlockTrieNode:
         assert len(self.children) == 0
         assert not self.is_in_evict_heap # A new node, updated later in callback_on_possible_leaf_change.
         self._storage_layer_info[0] = (True, timestamp, layer_timestamp)
+        if not self.check_if_inside_reorder_kv_heap():
+            self.insert_into_reorder_kv_heap()
+        # NOTE: Color can change.
+        self.modify_reorder_kv_heap_on_color_change()
         # Update timestamps.
         # print(f"timestamp of node {self.id} updated with {timestamp} for callback_on_insert_into_gpu.")
         self.timestamp_update(timestamp)
@@ -593,6 +653,10 @@ class KVBlockTrieNode:
         assert self._refcnt == 0
         assert not self.is_in_evict_heap # Should have been removed from list in evict_selection.
         self._storage_layer_info[color] = (False, -1.0, -1.0)
+        # NOTE: color will change to -1, just pop from heap.
+        assert self.color == -1
+        self.assert_inside_reorder_kv_heap()
+        self.pop_self_from_reorder_kv_heap_on_evict_to_discard()
         self.parent._children_color_cnt[color] -= 1
         assert self.parent._children_color_cnt[color] >= 0
         self.parent.callback_on_possible_leaf_change()
@@ -615,10 +679,12 @@ class KVBlockTrieNode:
                     # print(f"{self.id} Remove from heap on refcnt increase.")
                     self.remove_from_evict_heap()
         self._refcnt += 1
+        # print(f"{self.id} add_ref refcnt from {self._refcnt - 1} to {self._refcnt}")
     
     def remove_ref(self):
         self._refcnt -= 1
-        assert self._refcnt >= 0
+        # print(f"{self.id} remove_ref refcnt from {self._refcnt + 1} to {self._refcnt}")
+        assert self._refcnt >= 0, f"{self.id} with refcnt {self._refcnt}"
         if self._refcnt == 0:
             # print(f"{self} refcnt drops to 0.")
             # If refcnt drops to 0, allow to evict from last layer.
@@ -643,7 +709,8 @@ class KVBlockTrieNode:
 
 # Model channels outside the trie, this is only information about it.
 class KVBlockTrie:
-    def __init__(self, layer_pipeline: bool, block_size, num_layers: int, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool):
+    def __init__(self, layer_pipeline: bool, block_size, num_layers: int, 
+                 disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, allow_reorder_kv_blocks: bool):
         self.root = KVBlockTrieNode(None, tuple(), self, 0)
         print(f"scheduler-aware prefetch: {disk_cpu_prefetch}")
         print(f"scheduler-aware eviction: {scheduler_aware_eviction}")
@@ -652,6 +719,7 @@ class KVBlockTrie:
         global general_kv_block_size
         if general_kv_block_size is not None:
             assert general_kv_block_size == block_size
+        self._allow_reorder_kv_blocks = allow_reorder_kv_blocks
         self._evict_heap_size = []
         general_kv_block_size = block_size
         self._num_layers = num_layers
@@ -701,6 +769,12 @@ class KVBlockTrie:
         self._is_pgdsf_eviction = [False, False, False]
         self._pgdsf_clock = []
 
+        self.block_tokens_to_nodes = None
+        if self._allow_reorder_kv_blocks:
+            self.block_tokens_to_nodes = {}
+
+        self._blocks_extended_by_reorder = 0
+
         atexit.register(self.dump_stats)
 
     def set_cachedattention_newest_mark(self, value):
@@ -715,6 +789,7 @@ class KVBlockTrie:
         return self._scheduler_aware_eviction
 
     def dump_stats(self):
+        print(f"Blocks extended by reorder: {self._blocks_extended_by_reorder}")
         for i in range(len(self._num_blocks)):
             print(f"Layer {i}:")
             print(f"Insert: {self._insert_cnt[i]}, Evict: {self._evict_cnt[i]}, Hit: {self._hit_cnt[i]}")
@@ -1034,6 +1109,7 @@ class KVBlockTrie:
     
     def lookup(self, query: List[KVBlock], timestamp):
         # print(f"Lookup called with {len(query)} blocks.")
+        previous_hit_blocks = set()
         retval = [self.root]
         current_node = self.root
         for block in query:
@@ -1041,6 +1117,8 @@ class KVBlockTrie:
             if next_node is None:
                 break
             retval.append(next_node)
+            assert next_node not in previous_hit_blocks
+            previous_hit_blocks.add(next_node)
             # Update evict list.
             # FIXME: Now only LRU.
             # NOTE: Only move if already inside.
@@ -1050,6 +1128,28 @@ class KVBlockTrie:
                 next_node.timestamp_update(timestamp)
             current_node = next_node
         # len(retval) - 1 should be the number of full blocks found.
+        # Then extend it if allow_reorder_kv_blocks is True.
+        if self.allow_reorder_kv_blocks:
+            original_hit_len = len(retval) - 1
+            for i in range(original_hit_len, len(query)):
+                # print(f"Reorder lookup: {i}")
+                the_block = tuple(query[i].tokens)
+                if the_block not in self.block_tokens_to_nodes:
+                    break
+                else:
+                    min_heap: Heap = self.block_tokens_to_nodes[the_block]
+                    min_node = min_heap.get_min()
+                    if min_node in previous_hit_blocks:
+                        # print(f"\n\n\nWARNING: {min_node.id} already in previous_hit_blocks.\n\n\n\n")
+                        # NOTE: A workaround to avoid the space counting mess because of the same block
+                        # appearing multiple times in hit_trace.
+                        break
+                    else:
+                        previous_hit_blocks.add(min_node)
+                    assert min_node is not None # Or the heap should not exsist.
+                    # NOTE: Previously only add_ref for 
+                    retval.append(min_node)
+                    self._blocks_extended_by_reorder += 1
         return retval
 
     def insert_with_prepared_new_node(self, the_node: KVBlockTrieNode, layer_no: int, timestamp, layer_timestamp):
@@ -1208,6 +1308,10 @@ class KVBlockTrie:
     @property
     def pgdsf_clock(self):
         return self._pgdsf_clock
+    
+    @property
+    def allow_reorder_kv_blocks(self):
+        return self._allow_reorder_kv_blocks
 
 def get_general_kv_block_size():
     global general_kv_block_size

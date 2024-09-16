@@ -380,6 +380,10 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default=0.0,
         metadata={"help": "decode speed in tokens per second."},
     )
+    allow_reorder_kv_blocks: bool = field(
+        default=False,
+        metadata={"help": "Allow reorder kv blocks."},
+    )
 
 
 

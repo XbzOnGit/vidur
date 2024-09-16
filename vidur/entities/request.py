@@ -75,6 +75,9 @@ class Request(BaseEntity):
         self._pdgsf_alpha_on_prefill = None
         self._pdgsf_beta_on_prefill = None
 
+        self._remove_ref_list = []
+        self._done_inserted_remove_ref_idx = -1
+
     @property
     def first_token_time(self):
         return self._first_token_time
@@ -87,6 +90,17 @@ class Request(BaseEntity):
     @property
     def size(self) -> Tuple[int, int]:
         return (self._num_prefill_tokens, self._num_decode_tokens)
+    
+    @property
+    def remove_ref_list(self):
+        return self._remove_ref_list
+    
+    def append_remove_ref(self, node):
+        self._remove_ref_list.append(node)
+
+    def replace_remove_ref_on_done_block(self, new_node):
+        self._done_inserted_remove_ref_idx += 1
+        self._remove_ref_list[self._done_inserted_remove_ref_idx] = new_node
     
     @property
     def full_kvblocks(self) -> List[KVBlock]:

@@ -24,12 +24,13 @@ class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
                  gpu_write_through_cpu: bool, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, execution_time_predictor, 
                  pipeline_stage_id: int, quant_kv: bool, quant_ratio: float, decode_place: str, decode_speed: float, 
-                 self_replica_id: int, space_per_token_per_layer_before_quant: int):
+                 self_replica_id: int, space_per_token_per_layer_before_quant: int, allow_reorder_kv_blocks: bool):
         # Now always fetch the longest path.
         self._id = KVStorageController.generate_id()
+      
         self._kv_block_trie = KVBlockTrie(layer_pipeline, block_size, num_layers_per_node, 
-                                          disk_cpu_prefetch, 
-                                          scheduler_aware_eviction) # Only this storage, and everything on this.
+                                            disk_cpu_prefetch, 
+                                            scheduler_aware_eviction, allow_reorder_kv_blocks) # Only this storage, and everything on this.
         self._block_size = block_size
         self._active_blocks = {} # From reqid to number of active blocks.
         # Note that do not need to record the block here, cos its content can be gotten from request.tokens.
@@ -216,6 +217,8 @@ class KVStorageController(BaseEntity):
             # print(f"\nRequest {request.id} starts to be hacked.")
             hit_trace: List[KVBlockTrieNode] = self.lookup(request, timestamp)
             hit_traces.append(hit_trace)
+            # print(f"Request {request.id} has hit length: {len(hit_trace) - 1}")
+            # print(f"Request {request.id} has hit trace: {[hit.id for hit in hit_trace]}")
             for hit in hit_trace[1:]:
                 hit.set_do_not_evict(True)
                 if hit.is_in_evict_heap:
@@ -297,6 +300,7 @@ class KVStorageController(BaseEntity):
             current_full_blocks = curent_tokens_after_this // self._block_size
             previous_have_blocks = hit_length
             previous_full_blocks = request.num_processed_tokens // self._block_size
+            # print(f"Request {request.id} has previous full blocks: {previous_full_blocks}, previous have blocks: {previous_have_blocks}, current full blocks: {current_full_blocks}, current active blocks: {current_active_block}")
             if previous_have_blocks > previous_full_blocks:
                 # Effective hit.
                 # The later ones are effective hit.
@@ -305,6 +309,7 @@ class KVStorageController(BaseEntity):
                     hit_node = hit_trace[index]
                     hit_node.add_ref() # Effective hit means it should not be completely evicted until request is done/restarted.
                     self._kv_block_trie.add_hit(hit_node.color)
+                    request.append_remove_ref(hit_node)
             last_virtual_full_block: KVBlockTrieNode = hit_trace[len(hit_trace) - 1]
             last_depth = last_virtual_full_block.depth
             assert all(hit.refcnt > 0 for hit in hit_trace[1:])
@@ -318,6 +323,7 @@ class KVStorageController(BaseEntity):
                                                                  tuple(request.tokens[i * self._block_size: (i + 1) * self._block_size]),
                                                                  self._kv_block_trie, last_depth)
                     current_virtual_full_block.add_ref()
+                    request.append_remove_ref(current_virtual_full_block) # NOTE: Can be replaced.
                     new_full_blocks_list.append((request.id, current_virtual_full_block))
                     last_virtual_full_block = current_virtual_full_block
             # print(f"Request {request.id} has {current_active_block} active blocks after counting current.")
@@ -506,11 +512,12 @@ class KVStorageController(BaseEntity):
         if request.num_processed_tokens % self._block_size != 0:
             assert request.id in self._active_blocks
         num_processed_blocks = request.num_processed_tokens // self._block_size
-        kvblock_list = request.full_kvblocks[:num_processed_blocks]
         # Should not update timestamp.
-        hit_trace: List[KVBlockTrieNode] = self._kv_block_trie.lookup(kvblock_list, -1.0)
-        for hit in hit_trace[1:]:
-            hit.remove_ref()
+        remove_list: List[KVBlockTrieNode] = request.remove_ref_list
+        assert len(remove_list) == num_processed_blocks
+        for remove_node in remove_list:
+            # Do not remove the first one, there is no 'root' inside.
+            remove_node.remove_ref()
         self.remove_request_from_active_blocks(request.id)
 
     @property
@@ -532,6 +539,7 @@ class KVStorageController(BaseEntity):
             # NOTE: Although have called add_ref in lookup && new full blocks, 
             # that new block might not be inserted, but hit a previous block.
             # so add_ref should switch.
+            # NOTE: Here refcnt goes from one block to this real one.
             the_node.add_ref()
             # Anyway, it should be inside layer 0 now.
             original_color = the_node.color
@@ -657,6 +665,9 @@ class KVStorageController(BaseEntity):
                 modify_parent_dict[the_node] = new_node
                 if self._kv_block_trie.is_pgdsf_eviction[0]:
                     new_node.pgdsf_transfer(the_node)
+                # Change remove_ref_list
+                the_req = self._map_from_reqid_to_request[reqid]
+                the_req.replace_remove_ref_on_done_block(new_node)
             replace_list.append((reqid, new_node))
         # print(f"Switch into cache: {real_insert} out of {len(new_full_blocks_list)}.")
         now_blocks = self._kv_block_trie.available_blocks(0)

@@ -53,7 +53,6 @@ class ReplicaStageScheduler:
     def on_schedule(self, timestamp) -> Tuple[Batch, BatchStage, ExecutionTime, float, float, list]:
         if self._is_busy or not self._batch_queue:
             return None, None, None, None, None, None
-        # self._kv_cache_controller._kv_block_trie.check_size_consistency()
         self._is_busy = True
         batch = self._batch_queue.pop(0)
         # print(f"{batch.id} scheduled.")
@@ -89,8 +88,7 @@ class ReplicaStageScheduler:
             expected_real_insert_cnt = 0
             if self._kv_cache_controller._gpu_write_through_cpu:
                 # If not, do not write to CPU here.
-                # NOTE: If already in trie, pinned by set_do_not_evict, if not, not possible to get evicted.
-                # self._kv_cache_controller._kv_block_trie.check_size_consistency()
+                # NOTE: If already in, pinned by set_do_not_evict, if not, not possible to get evicted.
                 # print("\n\n---------------\n\n")
                 # for reid, th_node in new_full_blocks_list:
                 #     print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
@@ -174,7 +172,6 @@ class ReplicaStageScheduler:
                     # Free those too much.
                     if diff_cnt > 0:
                         self._kv_cache_controller.free_space_for_CPU(diff_cnt)
-            # self._kv_cache_controller._kv_block_trie.check_size_consistency()
         else:
             end_execution_time = start_first_exec_time + execution_time.total_time
             new_full_blocks_list = []
