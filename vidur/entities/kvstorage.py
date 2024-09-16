@@ -76,6 +76,12 @@ class KVStorageController(BaseEntity):
         self._from_other_replica_to_channel = {}
         self._space_per_token_per_layer_before_quant = space_per_token_per_layer_before_quant
         self._move_across_nodes = False
+        self._fetch_remote_cnt = 0
+        self._fetch_remote_num_blocks = 0
+        self._fetch_remote_delay = 0.0
+
+        self._block_number_acquire_space_active_blocks = 0
+
         atexit.register(self.dump_stats)
 
     def set_read_buffer_available(self, layer_no, timepoint):
@@ -164,9 +170,16 @@ class KVStorageController(BaseEntity):
         print()
         print(f"delay_of_waiting_for_prefetch_before_preload: {self._delay_of_waiting_for_prefetch_before_preload}")
         print(f"wait_for_active_blocks_sync_time: {self._wait_for_active_blocks_sync_time}")
+        print(f"number of blocks to acquire space for active blocks: {self._block_number_acquire_space_active_blocks}")
         print(f"wait_for_preload_space_synced_due_to_more_than_buf: {self._wait_for_preload_space_synced_due_to_more_than_buf}")
         print(f"time_saved_due_to_overlap_prefetch_and_preload: {self._time_saved_due_to_overlap_prefetch_and_preload}")
         print(f"preload_start_before_schedule_time: {self._preload_start_before_schedule_time}")
+        if self._move_across_nodes:
+            print(f"fetch_remote_cnt: {self._fetch_remote_cnt}")
+            print(f"fetch_remote_num_blocks: {self._fetch_remote_num_blocks}")
+            print(f"fetch_remote_delay: {self._fetch_remote_delay}")
+            if self._fetch_remote_cnt > 0:
+                print(f"average fetch remote delay: {self._fetch_remote_delay / self._fetch_remote_cnt}")
         print("\n")
     
     def on_batch_stage(self, batch_to_hack: Batch, timestamp) -> Tuple[Tuple[float, float], List[Tuple[int, KVBlockTrieNode]]]:
@@ -216,6 +229,7 @@ class KVStorageController(BaseEntity):
                 original_block_num = len(hit_trace) - 1
                 if max_others_block_num > original_block_num:
                     # Need to fetch more.
+                    # print(f"On {self.id}, Request {request.id} needs to fetch {max_others_block_num - original_block_num} from remote.")
                     add_blocks, end_two_fetch_time = self._fetch_disk_fetch_insert_remote(max_hit_replica, request, original_block_num, 
                                                          max_others_block_num, timestamp, hit_trace[-1])
                     # Channel will naturally accumulate end_two_fetch time in a correct way.
@@ -374,6 +388,7 @@ class KVStorageController(BaseEntity):
             # Recording of active blocks in controller have been updated.
             # print("2")
             # original_blocks = self._kv_block_trie.available_blocks(0)
+            self._block_number_acquire_space_active_blocks += number_of_blocks_to_active_diff
             msend, msfir, msper = self._kv_block_trie.synced_acquire_space(0, number_of_blocks_to_active_diff, timestamp, False, 
                                                                         False)
             self._kv_block_trie.mark_active_block_number(0, number_of_blocks_to_active_diff)
@@ -803,6 +818,9 @@ class KVStorageController(BaseEntity):
             # Wait for evict to complete when no pipeline.
             time_to_preload_start = max(evict_end_time, synced_to_mem_end_time, time_to_preload_start_lower_bound)
         
+        if not self._read_pipeline_buffer:
+            # preload in cachedattention.
+            time_to_preload_start = max(time_to_preload_start, timestamp)
         # max(max_arrival_time, last_channel_in_use, read_buffer_available, cpu_present_time, synced_make_space_time).
         end_time = time_to_preload_start
         end_firlayer_time = time_to_preload_start
@@ -964,6 +982,8 @@ class KVStorageController(BaseEntity):
         assert original_block_num >= 0
         remote_fetch_block_num = next_block_num - original_block_num
         assert remote_fetch_block_num > 0
+        self._fetch_remote_cnt += 1
+        self._fetch_remote_num_blocks += remote_fetch_block_num
         # Get disk blocks to fetch.
         reverse_disk_fetch_list = []
         temp_node = last_local_hit_node
@@ -1010,6 +1030,6 @@ class KVStorageController(BaseEntity):
             # After this, next time it will be a local hit.
             self._kv_block_trie.insert_one_node(new_node)
             add_blocks.append(new_node)
-
+        self._fetch_remote_delay += end_network_fetch_time - make_space_end_time
         self._kv_block_trie.add_insert(1, remote_fetch_block_num)
         return add_blocks, max(end_fetch_disk_time, end_network_fetch_time)

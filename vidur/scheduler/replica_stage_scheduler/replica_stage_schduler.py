@@ -1,9 +1,9 @@
 from typing import Tuple
-
+import atexit
 from vidur.entities import Batch, BatchStage, ExecutionTime, KVStorageController
 from vidur.execution_time_predictor import BaseExecutionTimePredictor
 
-
+# This is one node.
 class ReplicaStageScheduler:
     def __init__(
         self,
@@ -25,6 +25,11 @@ class ReplicaStageScheduler:
         self._batch_queue = []
         self._is_busy = False
 
+        self._prepare_time = 0.0
+        self._compute_time = 0.0
+
+
+        atexit.register(self.dump_stats)
     @property
     def is_last_stage(self) -> bool:
         return self._is_last_stage
@@ -38,6 +43,8 @@ class ReplicaStageScheduler:
     def on_stage_end(self) -> None:
         self._is_busy = False
 
+    def dump_stats(self):
+        print(f"Replica {self._replica_id}, stage {self._stage_id} prepare time: {self._prepare_time}, compute time: {self._compute_time}\n")
 
     # The replica scheduler should be more conservative than this.
     # Cos it does not know about lower layers and will call restart on requests.
@@ -56,6 +63,7 @@ class ReplicaStageScheduler:
         if self._kv_cache_controller is not None:
             ready_exec_timeinfo, new_full_blocks_list =  self._kv_cache_controller.on_batch_stage(batch, timestamp)
         start_first_exec_time, load_per_layer_time = ready_exec_timeinfo
+        self._prepare_time += start_first_exec_time - timestamp
 
         # Note that the fetch overhead here means the overhead that got stuck on cache fetch.
         # It can be zero because already in GPU or can be zero due to pipeline.
@@ -173,6 +181,9 @@ class ReplicaStageScheduler:
         # TODO: Check total execution time here.
         total_execution_time = end_execution_time - timestamp
         model_execution_time = execution_time.model_time
+        this_compute_time = end_execution_time - start_first_exec_time
+        # print(f"Replica {self._replica_id}, stage {self._stage_id}, batch {batch.id} with tokens {batch.num_tokens} , compute time: {this_compute_time}")
+        self._compute_time += this_compute_time
         # batch_stage.execution_time = total_execution_time = end_execution_time - timestamp
         # So in the end, batch stage end arrivals at end_execution_time - timestamp + timestamp
         # But float point error can cause trouble here, the next assertion might fail.

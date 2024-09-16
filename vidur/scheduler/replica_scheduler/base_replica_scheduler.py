@@ -72,6 +72,9 @@ class BaseReplicaScheduler(ABC):
         print(f"cache_reordering: {self._cache_reordering}")
         print(f"space per token on one stage: {(2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages}")
         space_per_token = (2 * 2 * replica.attention_head_dim * replica.num_kv_heads * replica.num_layers) // num_stages
+        print(f"Model attention head dim: {replica.attention_head_dim}")
+        print(f"Model num_kv_heads: {replica.num_kv_heads}")
+        print(f"Model num_layers: {replica.num_layers}")
         # per stage.
         space_per_token_per_layer = space_per_token // replica.num_layers
         space_per_block = replica_scheduler_config.block_size * space_per_token

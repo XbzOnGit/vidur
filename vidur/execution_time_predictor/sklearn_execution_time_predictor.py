@@ -868,6 +868,7 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
             for req in batch.requests:
                 print(f"num_processed_tokens of id {req.id}: {req.num_processed_tokens}")
             print("graduality: ", self._config.kv_cache_prediction_granularity)
+        # print(f"agg_kv_cache_size: {agg_kv_cache_size}, agg_prefill_chunk_size: {agg_prefill_chunk_size}")
         return self._predictions["attn_prefill"][
             (agg_kv_cache_size, round(agg_prefill_chunk_size) ** 2)
         ] * (
