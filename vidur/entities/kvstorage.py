@@ -226,20 +226,21 @@ class KVStorageController(BaseEntity):
                     hit.remove_from_evict_heap()
             if self._move_across_nodes:
                 max_hit_token_length, max_hit_replica = self._lookup_other_replicas(request)
-                assert max_hit_token_length % self._block_size == 0
-                # FIXME: Currently still all blocks.
-                max_others_block_num = max_hit_token_length // self._block_size
-                original_block_num = len(hit_trace) - 1
-                if max_others_block_num > original_block_num:
-                    # Need to fetch more.
-                    # print(f"On {self.id}, Request {request.id} needs to fetch {max_others_block_num - original_block_num} from remote.")
-                    add_blocks, end_two_fetch_time = self._fetch_disk_fetch_insert_remote(max_hit_replica, request, original_block_num, 
-                                                         max_others_block_num, timestamp, hit_trace[-1])
-                    # Channel will naturally accumulate end_two_fetch time in a correct way.
-                    # Then just select the max.
-                    if end_fetch_disk_and_remote_time is None or end_two_fetch_time > end_fetch_disk_and_remote_time:
-                        end_fetch_disk_and_remote_time = end_two_fetch_time
-                    hit_trace.extend(add_blocks)
+                if max_hit_token_length >= 0:
+                    assert max_hit_token_length % self._block_size == 0
+                    # FIXME: Currently still all blocks.
+                    max_others_block_num = max_hit_token_length // self._block_size
+                    original_block_num = len(hit_trace) - 1
+                    if max_others_block_num > original_block_num:
+                        # Need to fetch more.
+                        # print(f"On {self.id}, Request {request.id} needs to fetch {max_others_block_num - original_block_num} from remote.")
+                        add_blocks, end_two_fetch_time = self._fetch_disk_fetch_insert_remote(max_hit_replica, request, original_block_num, 
+                                                            max_others_block_num, timestamp, hit_trace[-1])
+                        # Channel will naturally accumulate end_two_fetch time in a correct way.
+                        # Then just select the max.
+                        if end_fetch_disk_and_remote_time is None or end_two_fetch_time > end_fetch_disk_and_remote_time:
+                            end_fetch_disk_and_remote_time = end_two_fetch_time
+                        hit_trace.extend(add_blocks)
 
             # Should forever be enough space on GPU for replica scheduler to guarantee.
             for hit in hit_trace[1:]:
@@ -902,7 +903,7 @@ class KVStorageController(BaseEntity):
         # Only prefetch the size that fits.
         read_buf_size = self._kv_block_trie.read_buffer_blocks(1)
         disk_read_channel: Channel = self._kv_block_trie.get_channel(1)[0]
-        assert number_of_blocks_to_fetch <= read_buf_size
+        assert number_of_blocks_to_fetch <= read_buf_size, f"{number_of_blocks_to_fetch} > {read_buf_size}"
         # Make read buf BIG enough, larger than KV cache available blocks in GPU.
         # So according to original scheduler, should be in this range.
 
