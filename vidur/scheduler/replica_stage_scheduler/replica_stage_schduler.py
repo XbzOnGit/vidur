@@ -62,7 +62,6 @@ class ReplicaStageScheduler:
         if self._kv_cache_controller is not None:
             ready_exec_timeinfo, new_full_blocks_list =  self._kv_cache_controller.on_batch_stage(batch, timestamp)
         start_first_exec_time, load_per_layer_time = ready_exec_timeinfo
-        self._prepare_time += start_first_exec_time - timestamp
 
         # Note that the fetch overhead here means the overhead that got stuck on cache fetch.
         # It can be zero because already in GPU or can be zero due to pipeline.
@@ -178,9 +177,10 @@ class ReplicaStageScheduler:
         # TODO: Check total execution time here.
         total_execution_time = end_execution_time - timestamp
         model_execution_time = execution_time.model_time
-        this_compute_time = end_execution_time - start_first_exec_time
+        # NOTE: This compute time includes the time of WAITING for the KV cache.
         # print(f"Replica {self._replica_id}, stage {self._stage_id}, batch {batch.id} with tokens {batch.num_tokens} , compute time: {this_compute_time}")
-        self._compute_time += this_compute_time
+        self._compute_time += execution_time.total_time
+        self._prepare_time += total_execution_time - execution_time.model_time
         # batch_stage.execution_time = total_execution_time = end_execution_time - timestamp
         # So in the end, batch stage end arrivals at end_execution_time - timestamp + timestamp
         # But float point error can cause trouble here, the next assertion might fail.
