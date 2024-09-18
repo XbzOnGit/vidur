@@ -86,7 +86,7 @@ class KVStorageController(BaseEntity):
         atexit.register(self.dump_stats)
 
     def set_read_buffer_available(self, layer_no, timepoint):
-        assert timepoint >= self._read_buffer_available[layer_no]
+        assert timepoint >= self._read_buffer_available[layer_no], f"{timepoint} < {self._read_buffer_available[layer_no]}"
         self._read_buffer_available[layer_no] = timepoint
     
     # Note that the evict_policy and evict_op here, sometimes should evict in advance to make space for the next stage.
@@ -780,12 +780,13 @@ class KVStorageController(BaseEntity):
                                                                                             timestamp, False, False)
                     async_preload_number = read_buffer_blocks
                     self._wait_for_preload_space_synced_due_to_more_than_buf += make_space_rbuf_end_time - timestamp
-                
+                make_space_rbuf_end_time = max(make_space_rbuf_end_time, read_buffer_available)
                 swap_end_time, swap_firlayer_time, swap_per_layer_time = \
                 self._kv_block_trie.synced_acquire_space(0, async_preload_number, 
                                                          make_space_rbuf_end_time, True, True)
                 assert make_space_rbuf_end_time >= timestamp
                 # TODO: Here it FORCES make_space_rbuf_end_time to be after timestamp.
+                # print(f"Set read buffer available because swap ends at: {swap_end_time}\nand timestamp: {timestamp}, make_space_rbuf_end_time: {make_space_rbuf_end_time}\n\n")
                 self.set_read_buffer_available(0, swap_end_time)
                 # Only wait until synced space is acquired.
                 # swap_end is marked, but do not wait here.
