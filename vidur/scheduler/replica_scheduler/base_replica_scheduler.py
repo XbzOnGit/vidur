@@ -77,6 +77,7 @@ class BaseReplicaScheduler(ABC):
         print(f"Model attention head dim: {replica.attention_head_dim}")
         print(f"Model num_kv_heads: {replica.num_kv_heads}")
         print(f"Model num_layers: {replica.num_layers}")
+        self._has_inter_request_kv_cahce = False
         # per stage.
         space_per_token_per_layer = space_per_token // replica.num_layers
         space_per_block = replica_scheduler_config.block_size * space_per_token
@@ -109,6 +110,7 @@ class BaseReplicaScheduler(ABC):
         if replica_scheduler_config.cache_lookup_type is not None:
             # FIXME: Now no PP.
             assert num_stages == 1
+            self._has_inter_request_kv_cahce = True
             layer_pipeline = replica_scheduler_config.layer_pipeline
             gpu_write_through_cpu = replica_scheduler_config.gpu_write_through_cpu
             disk_cpu_prefetch = replica_scheduler_config.disk_cpu_prefetch
@@ -359,7 +361,7 @@ class BaseReplicaScheduler(ABC):
         return self._replica_kv_controllers
     
     def check_if_scheduler_aware_eviction_in_cachedattention(self):
-        return any([controller.scheduler_aware_eviction for controller in self._replica_kv_controllers])
+        return self._has_inter_request_kv_cahce and any([controller.scheduler_aware_eviction for controller in self._replica_kv_controllers])
 
     # Should return a token length.
     def locality_check(self, request: Request):
