@@ -1052,7 +1052,7 @@ class KVBlockTrie:
                 # FIXME: Does this guarantee those loaded in here not evicted immediately?
                 if not allow_lower_write:
                     evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_synced_write)
-                    # FIXME: What makes it non-zero??!!
+                    # FIXME: What makes it non-zero.
                     # assert evict_per == 0
                     # assert evict_end == timestamp
                     # assert evict_fir == timestamp
@@ -1121,9 +1121,6 @@ class KVBlockTrie:
             assert next_node not in previous_hit_blocks
             previous_hit_blocks.add(next_node)
             # Update evict list.
-            # FIXME: Now only LRU.
-            # NOTE: Only move if already inside.
-            # NOTE: Just update in this order, should maintain leaf sets.
             if timestamp >= 0.0:
                 # print(f"timestamp of node {next_node.id} updated with {timestamp} for lookup.")
                 next_node.timestamp_update(timestamp)
