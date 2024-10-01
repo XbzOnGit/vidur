@@ -375,6 +375,10 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default="gpu",
         metadata={"help": "Decode place."},
     )
+    encode_speed: float = field(
+        default=0.0,
+        metadata={"help": "Encode speed in tokens per second."},
+    )
     # Ignore encode speed for now.
     decode_speed: float = field(
         default=0.0,

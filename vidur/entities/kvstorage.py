@@ -23,7 +23,7 @@ Always restore before the batch gets to be processed, cos for this batch_stage, 
 class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
                  gpu_write_through_cpu: bool, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, execution_time_predictor, 
-                 pipeline_stage_id: int, quant_kv: bool, quant_ratio: float, decode_place: str, decode_speed: float, 
+                 pipeline_stage_id: int, quant_kv: bool, quant_ratio: float, decode_place: str, decode_speed: float, encode_speed: float,
                  self_replica_id: int, space_per_token_per_layer_before_quant: int, allow_reorder_kv_blocks: bool):
         # Now always fetch the longest path.
         self._id = KVStorageController.generate_id()
@@ -69,6 +69,11 @@ class KVStorageController(BaseEntity):
         self._quant_ratio = quant_ratio
         self._decode_place = decode_place
         self._decode_speed = decode_speed
+        self._encode_speed = encode_speed
+        self._encoding_overhead = 0.0
+        self._decoding_overhead = 0.0
+        # FIXME: Now encode and decode on the same device.
+        self._encode_place = decode_place
         if self._quant_kv:
             if self._decode_speed <= 0:
                 print("WARNING: Decode speed <= 0, now ignore decoding time.")
@@ -84,6 +89,13 @@ class KVStorageController(BaseEntity):
         self._block_number_acquire_space_active_blocks = 0
 
         atexit.register(self.dump_stats)
+
+
+    def add_encoding_overhead(self, overhead):
+        self._encoding_overhead += overhead
+
+    def add_decoding_overhead(self, overhead):
+        self._decoding_overhead += overhead
 
     def set_read_buffer_available(self, layer_no, timepoint):
         assert timepoint >= self._read_buffer_available[layer_no], f"{timepoint} < {self._read_buffer_available[layer_no]}"
@@ -175,6 +187,8 @@ class KVStorageController(BaseEntity):
         print(f"wait_for_preload_space_synced_due_to_more_than_buf: {self._wait_for_preload_space_synced_due_to_more_than_buf}")
         print(f"time_saved_due_to_overlap_prefetch_and_preload: {self._time_saved_due_to_overlap_prefetch_and_preload}")
         print(f"preload_start_before_schedule_time: {self._preload_start_before_schedule_time}")
+        print(f"Encoding overhead: {self._encoding_overhead}")
+        print(f"Decoding overhead: {self._decoding_overhead}")
         if self._move_across_nodes:
             print(f"fetch_remote_cnt: {self._fetch_remote_cnt}")
             print(f"fetch_remote_num_blocks: {self._fetch_remote_num_blocks}")
@@ -525,7 +539,30 @@ class KVStorageController(BaseEntity):
     def num_layers(self):
         return self._num_layers
     
+    @property
+    def encode_speed(self):
+        return self._encode_speed
     
+    @property
+    def decode_speed(self):
+        return self._decode_speed
+    
+    @property
+    def quant_kv(self):
+        return self._quant_kv
+    
+    @property
+    def decode_place(self):
+        return self._decode_place
+    
+    @property
+    def encode_place(self):
+        return self._encode_place
+    
+    @property
+    def block_size(self):
+        return self._block_size
+
     # Space has even been acquired before.
     def _insert_with_prepared_node_into_layer0(self, the_node: KVBlockTrieNode, end_time, end_firlayer_time):
         # print(f"Inserting into layer 0, _used_blocks is {self._kv_block_trie._used_blocks[0]}")
@@ -745,7 +782,7 @@ class KVStorageController(BaseEntity):
         '''
         NOTE:
         Before batch_stage is called, prefetch is launched.
-        The sceond batch_stage is called, start to make space for active blocks and rbuffer.
+        The second batch_stage is called, start to make space for active blocks and rbuffer.
         Calculate when to preload by considering when blocks are synced into memory.
         time_to_preload_start + per_layer_preload_time * (K-1) should be >= synced_to_mem_start + synced_to_mem_per_layer_time * K.
         for K from 1 to num_layers.
@@ -845,17 +882,14 @@ class KVStorageController(BaseEntity):
         end_time, end_firlayer_time, per_layer_preload_time = \
         read_channel.transmit(number_of_blocks_to_preload * self._block_size, 
                               time_to_preload_start, self._num_layers)
-        # TODO: Write another function, enable chunk pipeline and exec for it later.
         if self._quant_kv:
             # Add decoding overhead here.
             assert not self._layer_pipeline
             if self._decode_place.upper() == "GPU":
-                # decode speed should be given on token number.
-                # Now CHUNKS??!!
-                # TODO: Model chunks, better another function at all, and execute chunk by chunk.
-                # So another exec function as well, do it like layer pipeline but not the same.
                 if self._decode_speed > 0:
-                    end_time += number_of_blocks_to_preload * self._block_size / self._decode_speed
+                    decode_time = number_of_blocks_to_preload * self._block_size / self._decode_speed
+                    end_time += decode_time
+                    self.add_decoding_overhead(decode_time)
         ready_exec_per_layer = (end_firlayer_time, per_layer_preload_time) if self._layer_pipeline else (end_time, 0.0)
         for node in preload_list:
             assert node.color == 1
@@ -964,8 +998,6 @@ class KVStorageController(BaseEntity):
                 max_hit_replica = replica_scheduler
         return max_hit_token_length, max_hit_replica
                 
-    # FIXME: Now there's a hole for cachegen.
-    # FIXME: Use a channel, which will naturally show the congestion between requests, when no pipeline.
     def lookup(self, request, timestamp):
         # Can be remote.
         # if request.num_processed_tokens % self._block_size != 0:
@@ -981,16 +1013,14 @@ class KVStorageController(BaseEntity):
     def locality_check(self, request):
         return (len(self.lookup(request, -1.0)) - 1) * self._block_size
     
-
-    # FIXME: Now assuming that network card can read from DISK && CPU && GPU, at the same speed.
-    # Or if a write through is enabled, it should read from CPU && DISK.
+    # NOTE: Now fetch from remote device always to local CPU.
+    # When write through is enabled, it should read from CPU && DISK.
     # NOTE: Return a list and a timestamp that the blocks for this request can be used.
     # NOTE: Should be called after all blocks local fetched synced / prefetched.
     def _fetch_disk_fetch_insert_remote(self, replica_to_fetch, request, 
                                                      original_block_num, next_block_num, timestamp, last_local_hit_node):
         assert self._move_across_nodes
-        # NOTE: Currently does not support this.
-        # FIXME: Now no prefetch for this, always synced fetch.
+        # NOTE: No prefetch for this.
         assert not self._disk_cpu_prefetch
         assert original_block_num >= 0
         remote_fetch_block_num = next_block_num - original_block_num
@@ -1011,7 +1041,7 @@ class KVStorageController(BaseEntity):
                                                                              timestamp,
                                                                              False,
                                                                              False)
-        # FIXME: Now always wait until ALL space available then fetch.
+        # NOTE: Now always wait until ALL space available then fetch.
         # Fetch from disk.
         end_fetch_disk_time, end_fetch_disk_fir, end_fetch_disk_per = self.synced_fetch_from_disk_to_memory(
             reverse_disk_fetch_list, make_space_end_time, True)
@@ -1024,7 +1054,7 @@ class KVStorageController(BaseEntity):
         last_depth = last_virtual_block.depth
         start_idx = original_block_num * self._block_size
         add_blocks = []
-        # FIXME: Should check when that block is available on remote node, which can introduce some overhead.
+        # NOTE: Should check when that block is available on remote node, which can introduce some overhead.
         # Need another interface other than locality_check. Should know a timestamp to use it.
 
         # FIXME: If the remote block is not in CPU.

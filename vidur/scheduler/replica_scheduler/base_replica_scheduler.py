@@ -126,7 +126,7 @@ class BaseReplicaScheduler(ABC):
                                              read_pipeline_buffer, gpu_write_through_cpu, disk_cpu_prefetch, 
                                              scheduler_aware_eviction, execution_time_predictor, 0, 
                                              replica_scheduler_config.quant_kv, replica_scheduler_config.quant_ratio, 
-                                             replica_scheduler_config.decode_place, replica_scheduler_config.decode_speed, 
+                                             replica_scheduler_config.decode_place, replica_scheduler_config.decode_speed,replica_scheduler_config.encode_speed,
                                              self._replica_id, space_per_token_per_layer, replica_scheduler_config.allow_reorder_kv_blocks)
             self._replica_kv_controllers.append(controller)
             # Space per token for each stage(each node).
