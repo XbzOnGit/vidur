@@ -331,9 +331,10 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default=False,
         metadata={"help": "Read pipeline buffer."},
     )
-    gpu_write_through_cpu: bool = field(
-        default=False,
+    gpu_write_through_cpu: str = field(
+        default="no",
         metadata={"help": "GPU write through CPU."},
+        # no/async/sync
     )
     read_buffer_fraction: float = field(
         default=0.1,

@@ -22,7 +22,7 @@ Always restore before the batch gets to be processed, cos for this batch_stage, 
 # All memory, including those in lower memory, are managed in blocks.
 class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
-                 gpu_write_through_cpu: bool, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, execution_time_predictor, 
+                 gpu_write_through_cpu: str, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, execution_time_predictor, 
                  pipeline_stage_id: int, quant_kv: bool, quant_ratio: float, decode_place: str, decode_speed: float, encode_speed: float,
                  self_replica_id: int, space_per_token_per_layer_before_quant: int, allow_reorder_kv_blocks: bool):
         # Now always fetch the longest path.
@@ -48,6 +48,7 @@ class KVStorageController(BaseEntity):
         self._num_layers = num_layers_per_node # This is per node(per controller).
         self._read_pipeline_buffer = read_pipeline_buffer
         self._gpu_write_through_cpu = gpu_write_through_cpu
+        assert gpu_write_through_cpu.upper() in ["NO", "ASYNC", "SYNC"]
         self._disk_cpu_prefetch = disk_cpu_prefetch
         self._storage_layer_cnt = 0
         self._delay_of_waiting_for_prefetch_before_preload = 0.0
@@ -197,6 +198,33 @@ class KVStorageController(BaseEntity):
                 print(f"average fetch remote delay: {self._fetch_remote_delay / self._fetch_remote_cnt}")
         print("\n")
     
+    def store_after_exec(self, new_full_blocks_list, end_execution_time, end_exec_of_first_layer, async_write_list, expected_real_insert_cnt):
+        if len(new_full_blocks_list) > 0:
+                self.switch_active_fullblocks_into_cache(new_full_blocks_list, 
+                                                                        end_execution_time, end_exec_of_first_layer)
+                # new full blocks list is actually changed after this call, some blocks can be duplicated.
+                # Filter them out.
+                block_id_set = set()
+                next_list = []
+                for block in new_full_blocks_list:
+                    if block[1].id not in block_id_set:
+                        next_list.append(block)
+                        block_id_set.add(block[1].id)
+                new_full_blocks_list = next_list
+                if self._gpu_write_through_cpu.upper() == "ASYNC":
+                    assert len(async_write_list) == self.num_layers
+                    # Set present time in CPU.
+                    real_insert_cnt = self.set_full_block_present_in_after_async_write(new_full_blocks_list, 
+                                                                                        async_write_list[-1],
+                                                                                        async_write_list[0])
+                    # Cannot assert ==, just <=.
+                    # The eviction can be too aggresive.
+                    assert real_insert_cnt <= expected_real_insert_cnt, f"{real_insert_cnt} > {expected_real_insert_cnt}, len(new_full_blocks_list): {len(new_full_blocks_list)}"
+                    diff_cnt = expected_real_insert_cnt - real_insert_cnt
+                    # Free those too much.
+                    if diff_cnt > 0:
+                        self.free_space_for_CPU(diff_cnt)
+
     def _lookup_and_fetch_from_remote(self, batch_to_hack: Batch, timestamp):
         hit_traces = []
         cache_and_compute_len = []
@@ -270,14 +298,6 @@ class KVStorageController(BaseEntity):
                 # But in that process, some NEW blocks are created.
                 hit.set_do_not_evict(True)
                 if hit.is_in_evict_heap:
-                    # Pin them.
-                    # print(f"Remove {hit.id} from evict of layer {color}, it is leaf: {hit.is_leaf}")
-                    # if len(hit.children) > 0:
-                    #     for child in hit.children.values():
-                    #         print(f"Child {child.id} has color {child.color}")
-                    # else:
-                    #     print("No children.")
-                    # print(f"Remove {hit.id} from evict of layer {color}, due to hit.")
                     hit.remove_from_evict_heap()
             hit_length = len(hit_trace) - 1
             if request.last_cache_len_on_prefill is None:
@@ -372,6 +392,8 @@ class KVStorageController(BaseEntity):
         msend = timestamp
         msfir = timestamp
         msper = 0.0
+        # FIXME: Now launch eviction for active blocks together with preload blocks.
+        # It can be latter, allowing preload to start earlier.
         if self._kv_block_trie.available_blocks(0) < number_of_blocks_to_active_diff:
             # print("Called")
             # Wait for it.
@@ -477,36 +499,20 @@ class KVStorageController(BaseEntity):
         # Filter new_full_blocks_list to only take those really need.
         batch_to_hack.set_restore_between_stages(kv_hit_length_list, num_processed_tokens_list, should_reset_prefill_complete_list, batch_num_tokens_list, new_full_blocks_list)
     
-    def on_batch_stage(self, batch_to_hack: Batch, timestamp) -> Tuple[Tuple[float, float], List[Tuple[int, KVBlockTrieNode]]]:
-        # Return the timepoint ready to execute and the per layer preload time.
-        # Step 1. From num_processed to num_processed + num_tokens
-        # Only care about those num_processed tokens % block_size == 0.
-        # num_processed_tokens is KV cache hit length + active blocks.
 
-        # Cut block by block and lookup, then allocate active blocks for the rest.
-        # Step 2. Add overhead, hack requests and restore information.
-        # Step 3. Return the timepoint ready to execute to relica stage scheduler.
-
-
+    def lookup_then_fetch(self, batch_to_hack: Batch, timestamp) -> Tuple[Tuple[float, float], List[Tuple[int, KVBlockTrieNode]]]:
         max_arrival_time = max([request.arrived_at for request in batch_to_hack.requests])
         hit_traces, preload_list, synced_fetch_from_disk_to_memory_list, \
             end_fetch_disk_and_remote_time, number_of_blocks_to_active_diff, new_full_blocks_list, cache_and_compute_len = \
                   self._lookup_and_fetch_from_remote(batch_to_hack, timestamp)
         
         synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = \
-        self.move_to_cpu_or_higher(end_fetch_disk_and_remote_time, synced_fetch_from_disk_to_memory_list, timestamp, max_arrival_time)
-
-        # FIXME: Now launch eviction for active blocks together with preload blocks.
-        # It can be latter, allowing preload to start earlier.
-        
+        self.move_to_cpu_or_higher(end_fetch_disk_and_remote_time, \
+                                   synced_fetch_from_disk_to_memory_list, timestamp, max_arrival_time)
 
         assert number_of_blocks_to_active_diff >= 0
-        # print(f"Number of blocks to active diff: {number_of_blocks_to_active_diff}\n\n")
-        # Space for active blocks have been made above.
-        # Active blocks marked in controller.
-        # Now mark in KVBlockTrie.
 
-        # Make space on the highest level.
+
         ready_exec_per_layer, end_time = \
         self.move_to_gpu(batch_to_hack, preload_list, timestamp, \
                          (synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time), \
@@ -515,6 +521,80 @@ class KVStorageController(BaseEntity):
         self.unpin_and_update_after_load(hit_traces, cache_and_compute_len)
         self.modify_batch(batch_to_hack, hit_traces, end_time, new_full_blocks_list)
         return ready_exec_per_layer, new_full_blocks_list
+
+
+    def execution_and_store(self, execution_time, new_full_blocks_list, start_first_exec_time, 
+                                   load_per_layer_time, timestamp):
+        per_layer_execution_time = execution_time.total_time / self.num_layers
+        end_execution_time = None
+        end_last_exec_time = timestamp
+        end_last_preload_time = start_first_exec_time
+        end_exec_of_first_layer = None
+        cpu_make_space_per_layer_time = None
+        end_last_cpu_make_space_layer_time = None
+        
+        # assert timestamp <= start_first_exec_time, f"{timestamp} > {start_first_exec_time}"
+        # Can be smaller, if preload in advance into buffer.
+
+        # NOTE: Execution layer by layer.
+        async_write_list = []
+        # print("\n\n------------\n\n")
+        expected_real_insert_cnt = 0
+        if self._gpu_write_through_cpu.upper() == "ASYNC":
+            # If not, do not write to CPU here.
+            # NOTE: If already in, pinned by set_do_not_evict, if not, not possible to get evicted.
+            # print("\n\n---------------\n\n")
+            # for reid, th_node in new_full_blocks_list:
+            #     print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
+            new_list = self.filter_write_to_CPU_and_preaccess(new_full_blocks_list, timestamp)
+            # print("\n")
+            # for reid, th_node in new_list:
+            #     print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
+            # for new_node in new_list:
+            #     print(f"Expected insert CPU node: {new_node[1].id}")
+            # FIXME:
+            # The ones swapped out from swicth into cache can also demand space in CPU for write through.
+            # Anyway, at most len(new_full_blocks_list) blocks can be inserted into CPU.
+            # needed_block_number = len(new_list)
+            needed_block_number = len(new_full_blocks_list)
+            expected_real_insert_cnt = needed_block_number
+            # print(f"Expected insert CPU node: {needed_block_number}")
+            
+
+            end_cpu_make_space_time, end_cpu_make_space_fir_time, cpu_make_space_per_layer_time = \
+            self.acquire_space_for_CPU(needed_block_number, timestamp)
+            # print("\n")
+            # for reid, th_node in new_list:
+            #     print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
+            end_last_cpu_make_space_layer_time = timestamp # Get per layer time that CPU memory is available.
+            # Make CPU has this much space to write to, can trigger eviction to disks.
+        # print(f"per_layer_execution_time: {per_layer_execution_time}, load_per_layer_time: {load_per_layer_time}")
+        # print(f"timestamp: {timestamp}, start_first_exec_time: {start_first_exec_time}")
+        for _ in range(self.num_layers):
+            start_this_exec_time = max(end_last_exec_time, end_last_preload_time)
+            end_this_exec_time = start_this_exec_time + per_layer_execution_time
+            # print(f"Layer{_}: start_this_exec_time: {start_this_exec_time}, end_last_preload_time: {end_last_preload_time}, end_this_exec_time: {end_this_exec_time}")
+            if end_exec_of_first_layer is None:
+                end_exec_of_first_layer = end_this_exec_time
+            # Launch async write.
+            if self._gpu_write_through_cpu.upper() == "ASYNC":
+                # Has filtered to not present in CPU in write_through inside this function.
+                write_timepoint = max(end_last_cpu_make_space_layer_time, end_this_exec_time)
+                # Should be execed && have enough CPU space.
+                # Note that it is 0 --> 1 write, so layer_no is 0.
+                end_aw, end_faw, end_per_aw = \
+                self.use_channel(0, needed_block_number, 1, write_timepoint, 1)
+                assert end_aw == end_faw, f"{end_aw} != {end_faw}"
+                async_write_list.append(end_aw)
+                # Assume make space is continuous.
+                end_last_cpu_make_space_layer_time += cpu_make_space_per_layer_time
+            end_last_exec_time = end_this_exec_time
+            # Assume that preload is continuous.
+            end_last_preload_time += load_per_layer_time
+        end_execution_time = end_last_exec_time
+        self.store_after_exec(new_full_blocks_list, end_execution_time, end_exec_of_first_layer, 
+                                                    async_write_list, expected_real_insert_cnt)
+        return end_execution_time
 
     def set_other_replicas(self, other_replicas, p2p_bandwidth_between_nodes):
         # Replica: Channel
@@ -748,18 +828,9 @@ class KVStorageController(BaseEntity):
         # print(f"call_cnt: {call_cnt}")
         return cnt
 
-    '''
-    # NOTE: If no hit on CPU at all, but very big cache size(like big_swap)
-    # (layer_pipeline, read_pipeline_buffer, gpu_write_through_cpu):
-    # No CPU memory can be the same with (False, False, True).
-    # (True, True, True) in this case can give a close but different number??!! WHY??!!
-    # (False, False, False) can be slower, cos sometimes it triggers synced evict from GPU to CPU.
-    '''
     # Return (ready_exec_first_layer, per_layer_preload_time), end_time
     def preload_into_GPU(self, batch: Batch, preload_list: List[KVBlockTrieNode], timestamp, synced_to_mem_end_time, 
                          synced_to_mem_fir_time, synced_to_mem_per_layer_time, msend, msfir, msper):
-        # self._kv_block_trie.check_size_consistency()
-        # max(max_arrival_time, last_channel_in_use, read_buffer_available).
         read_channel = self._kv_block_trie.get_channel(0)[0]
         last_channel_in_use_time = read_channel.last_time_in_use
         assert timestamp >= last_channel_in_use_time
@@ -819,7 +890,7 @@ class KVStorageController(BaseEntity):
         # or on K = 1.
         if self._layer_pipeline:
             if self._read_pipeline_buffer:
-                assert self._gpu_write_through_cpu
+                assert self._gpu_write_through_cpu.upper() != "NO"
                 read_buffer_blocks = self._kv_block_trie.read_buffer_blocks(0)
                 make_space_rbuf_end_time = timestamp
                 make_space_rbuf_firlayer_time = timestamp

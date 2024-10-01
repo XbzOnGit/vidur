@@ -117,9 +117,9 @@ class BaseReplicaScheduler(ABC):
             scheduler_aware_eviction = replica_scheduler_config.scheduler_aware_eviction
             if disk_cpu_prefetch or scheduler_aware_eviction:
                 assert layer_pipeline
-                assert gpu_write_through_cpu
+                assert gpu_write_through_cpu.upper() != "NO"
             if read_pipeline_buffer:
-                assert gpu_write_through_cpu, "GPU write through CPU must be enabled when read pipeline buffer is enabled."
+                assert gpu_write_through_cpu.upper() != "NO", "GPU write through CPU must be enabled when read pipeline buffer is enabled."
             # read_pipeline_buffer = True if replica_scheduler_config.read_pipeline_buffer.upper() == "TRUE" else False
             # FIXME: Now no PP, always stage_id 0 in KVStorageController.
             controller = KVStorageController(replica_scheduler_config.block_size, layer_pipeline, replica.num_layers // num_stages,
