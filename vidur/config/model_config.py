@@ -124,6 +124,20 @@ class Llama3_70BModelConfig(Llama2ModelConfig):
     def get_name():
         return "meta-llama/Meta-Llama-3-70B"
 
+@dataclass
+class Mistral_7BModelConfig(Llama2ModelConfig):
+    num_layers: int = 32
+    num_q_heads: int = 32
+    num_kv_heads: int = 8
+    embedding_dim: int = 4096
+    mlp_hidden_dim: int = 14336
+    max_position_embeddings: int = 32768
+    rope_theta: Optional[float] = 1000000.0
+    vocab_size: int = 32000
+
+    @staticmethod
+    def get_name():
+        return "mistralai/Mistral-7B-Instruct-v0.2"
 
 @dataclass
 class InternLMModelConfig(Llama2ModelConfig):
