@@ -4,6 +4,7 @@ import pickle
 from abc import abstractmethod
 from itertools import product
 from typing import Any, Dict, List, Tuple
+import time
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,7 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
         replica_scheduler_config: BaseReplicaSchedulerConfig,
         metrics_config: MetricsConfig,
     ) -> None:
+        t1 = time.perf_counter()
         super().__init__(
             predictor_config=predictor_config,
             replica_config=replica_config,
@@ -83,6 +85,8 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
 
         self._models = self._train_models()
         self._predictions = self._predict_from_models()
+        t2 = time.perf_counter()
+        print(f"Init sklearn predictor clock time: {t2 - t1} seconds")
 
     def _get_input_files(self) -> Tuple[str, str, str, str, str]:
         input_files = [

@@ -1,4 +1,5 @@
 from typing import List, Tuple, Set
+import time
 import atexit
 import math
 from vidur.entities.kv_block_trie import KVBlockTrie, KVBlockTrieNode
@@ -10,15 +11,7 @@ from vidur.logger import init_logger
 
 logger = init_logger(__name__)
 
-call_cnt = 0
 
-'''
-1. Feed a batch stage with batch info into thsi controller.
-Then it can manage the blocks of KV cache, after hit/miss/fetch/evict and allocate.
-Also hack its token numbers but keep what's hacked restore information inside the batch.
-Always restore before the batch gets to be processed, cos for this batch_stage, the KV operations haven't been done.
-2. On batch stage end, it can insert full blocks and if completed, evict not-full active blocks.
-'''
 # All memory, including those in lower memory, are managed in blocks.
 class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
@@ -73,7 +66,8 @@ class KVStorageController(BaseEntity):
         self._encode_speed = encode_speed
         self._encoding_overhead = 0.0
         self._decoding_overhead = 0.0
-        # FIXME: Now encode and decode on the same device.
+        self._lookup_clock_time = 0.0
+        # NOTE: Now encode and decode on the same device.
         self._encode_place = decode_place
         if self._quant_kv:
             if self._decode_speed <= 0:
@@ -84,6 +78,7 @@ class KVStorageController(BaseEntity):
         self._space_per_token_per_layer_before_quant = space_per_token_per_layer_before_quant
         self._move_across_nodes = False
         self._fetch_remote_cnt = 0
+        self._remote_fetch_cut_due_to_gpu_prefix = 0
         self._fetch_remote_num_blocks = 0
         self._fetch_remote_delay = 0.0
 
@@ -194,11 +189,16 @@ class KVStorageController(BaseEntity):
             print(f"fetch_remote_cnt: {self._fetch_remote_cnt}")
             print(f"fetch_remote_num_blocks: {self._fetch_remote_num_blocks}")
             print(f"fetch_remote_delay: {self._fetch_remote_delay}")
+            print(f"remote_fetch_cut_due_to_gpu_prefix: {self._remote_fetch_cut_due_to_gpu_prefix}")
             if self._fetch_remote_cnt > 0:
                 print(f"average fetch remote delay: {self._fetch_remote_delay / self._fetch_remote_cnt}")
+        print(f"Lookup clock time: {self._lookup_clock_time} seconds")
         print("\n")
     
-    def store_after_exec(self, new_full_blocks_list, end_execution_time, end_exec_of_first_layer, async_write_list, expected_real_insert_cnt):
+    def store_after_exec(self, new_full_blocks_list, 
+                         end_execution_time: float, 
+                         end_exec_of_first_layer, async_write_list, expected_real_insert_cnt) -> float:
+        synced_write_end_time = end_execution_time
         if len(new_full_blocks_list) > 0:
                 self.switch_active_fullblocks_into_cache(new_full_blocks_list, 
                                                                         end_execution_time, end_exec_of_first_layer)
@@ -214,7 +214,7 @@ class KVStorageController(BaseEntity):
                 if self._gpu_write_through_cpu.upper() == "ASYNC":
                     assert len(async_write_list) == self.num_layers
                     # Set present time in CPU.
-                    real_insert_cnt = self.set_full_block_present_in_after_async_write(new_full_blocks_list, 
+                    real_insert_cnt = self.set_full_block_present_in_after_write(new_full_blocks_list, 
                                                                                         async_write_list[-1],
                                                                                         async_write_list[0])
                     # Cannot assert ==, just <=.
@@ -224,6 +224,17 @@ class KVStorageController(BaseEntity):
                     # Free those too much.
                     if diff_cnt > 0:
                         self.free_space_for_CPU(diff_cnt)
+                elif self._gpu_write_through_cpu.upper() == "SYNC":
+                    filtered_list = self.filter_write(new_full_blocks_list)
+                    end_w, end_fw, end_per_w = self.use_channel(0, len(filtered_list), 
+                                                                1, end_execution_time, self.num_layers)
+                    # Mark it.
+                    real_insert_cnt = self.set_full_block_present_in_after_write(filtered_list, end_w, end_fw)
+                    assert real_insert_cnt == len(filtered_list)
+                    synced_write_end_time = end_w
+        return synced_write_end_time
+
+
 
     def _lookup_and_fetch_from_remote(self, batch_to_hack: Batch, timestamp):
         hit_traces = []
@@ -254,12 +265,10 @@ class KVStorageController(BaseEntity):
                 max_hit_token_length, max_hit_replica = self._lookup_other_replicas(request)
                 if max_hit_token_length >= 0:
                     assert max_hit_token_length % self._block_size == 0
-                    # FIXME: Currently still all blocks.
                     max_others_block_num = max_hit_token_length // self._block_size
                     original_block_num = len(hit_trace) - 1
                     if max_others_block_num > original_block_num:
                         # Need to fetch more.
-                        # print(f"On {self.id}, Request {request.id} needs to fetch {max_others_block_num - original_block_num} from remote.")
                         add_blocks, end_two_fetch_time = self._fetch_disk_fetch_insert_remote(max_hit_replica, request, original_block_num, 
                                                             max_others_block_num, timestamp, hit_trace[-1])
                         # Channel will naturally accumulate end_two_fetch time in a correct way.
@@ -392,7 +401,7 @@ class KVStorageController(BaseEntity):
         msend = timestamp
         msfir = timestamp
         msper = 0.0
-        # FIXME: Now launch eviction for active blocks together with preload blocks.
+        # NOTE: Now launch eviction for active blocks together with preload blocks.
         # It can be latter, allowing preload to start earlier.
         if self._kv_block_trie.available_blocks(0) < number_of_blocks_to_active_diff:
             # print("Called")
@@ -407,7 +416,7 @@ class KVStorageController(BaseEntity):
             # self._kv_block_trie.check_size_consistency()
             # print(f"{original_blocks} -> {self._kv_block_trie.available_blocks(0)}")
             assert msend >= timestamp
-            # FIXME: Should I pipeline this??!!
+            # NOTE: This is not pipelined now.
             self._wait_for_active_blocks_sync_time += msend - timestamp
         else:
             # print("3")
@@ -552,11 +561,12 @@ class KVStorageController(BaseEntity):
             #     print(f"reqid: {reid}, the_node: {th_node.id}, storage info {[th_node.storage_layer_info[i][0] for i in range(3)]}")
             # for new_node in new_list:
             #     print(f"Expected insert CPU node: {new_node[1].id}")
-            # FIXME:
+            # NOTE:
             # The ones swapped out from swicth into cache can also demand space in CPU for write through.
             # Anyway, at most len(new_full_blocks_list) blocks can be inserted into CPU.
             # needed_block_number = len(new_list)
             needed_block_number = len(new_full_blocks_list)
+            # So in a conservative way, just use len(new_full_blocks_list).
             expected_real_insert_cnt = needed_block_number
             # print(f"Expected insert CPU node: {needed_block_number}")
             
@@ -592,9 +602,10 @@ class KVStorageController(BaseEntity):
             # Assume that preload is continuous.
             end_last_preload_time += load_per_layer_time
         end_execution_time = end_last_exec_time
+        synced_write_end_time = \
         self.store_after_exec(new_full_blocks_list, end_execution_time, end_exec_of_first_layer, 
                                                     async_write_list, expected_real_insert_cnt)
-        return end_execution_time
+        return end_execution_time, synced_write_end_time
 
     def set_other_replicas(self, other_replicas, p2p_bandwidth_between_nodes):
         # Replica: Channel
@@ -692,15 +703,11 @@ class KVStorageController(BaseEntity):
                     # print(f"Inserted into layer 0 with already in layer 1, _used_blocks is {self._kv_block_trie._used_blocks[0]}")
                 else:
                     assert original_color == 2
-                    # FIXME: This means with disk, must have gpu to cpu write through??!!
-                    
                     # assert self._gpu_write_through_cpu
                     # This can rely on later write through.
                     # extra_node_for_async_write_through = True
                     # self._kv_block_trie.insert_into_gpu_from_active_block_original_in_disk(the_node, 
                     #                                                                        end_time, end_firlayer_time)
-                    # if the_node.id == 5420:
-                    #     print(f"{the_node.id}, Inserting into layer 0 with already in layer 2")
                     self._kv_block_trie.insert_into_gpu_from_active_block_original_in_disk_allow_tft(the_node, 
                                                                                                         end_time, 
                                                                                                         end_firlayer_time)
@@ -812,10 +819,8 @@ class KVStorageController(BaseEntity):
         # self._kv_block_trie._get_size(0) # Only check layer 0.
         
 
-    def set_full_block_present_in_after_async_write(self, new_full_blocks_list: List[Tuple[int, KVBlockTrieNode]], 
+    def set_full_block_present_in_after_write(self, new_full_blocks_list: List[Tuple[int, KVBlockTrieNode]], 
                                                     end_time, end_firlayer_time):
-        global call_cnt
-        call_cnt += 1
         cnt = 0
         for reqid, the_node in new_full_blocks_list:
             assert reqid in self._active_blocks
@@ -825,8 +830,14 @@ class KVStorageController(BaseEntity):
                 self._kv_block_trie.add_insert(1)
                 the_node.push_to_lower_location(end_time, end_firlayer_time)
                 cnt += 1
-        # print(f"call_cnt: {call_cnt}")
         return cnt
+
+    def filter_write(self, new_full_blocks_list: List[Tuple[int, KVBlockTrieNode]]):
+        new_list = []
+        for reqid, the_node in new_full_blocks_list:
+            if not the_node.check_if_color_present(1):
+                new_list.append((reqid, the_node))
+        return new_list
 
     # Return (ready_exec_first_layer, per_layer_preload_time), end_time
     def preload_into_GPU(self, batch: Batch, preload_list: List[KVBlockTrieNode], timestamp, synced_to_mem_end_time, 
@@ -852,8 +863,7 @@ class KVStorageController(BaseEntity):
             assert synced_to_mem_per_layer_time == 0.0
             # Just wait for active blocks.
             if msend > timestamp:
-                # FIXME: Currently this is not pipelined.
-                # But it can be.
+                # NOTE: Currently this is not pipelined.
                 # print(f"Wait for active blocks time: {msend - timestamp}")
                 return (msend, 0.0), msend
             return (timestamp, 0.0), timestamp
@@ -908,13 +918,11 @@ class KVStorageController(BaseEntity):
                 self._kv_block_trie.synced_acquire_space(0, async_preload_number, 
                                                          make_space_rbuf_end_time, True, True)
                 assert make_space_rbuf_end_time >= timestamp
-                # TODO: Here it FORCES make_space_rbuf_end_time to be after timestamp.
-                # print(f"Set read buffer available because swap ends at: {swap_end_time}\nand timestamp: {timestamp}, make_space_rbuf_end_time: {make_space_rbuf_end_time}\n\n")
                 self.set_read_buffer_available(0, swap_end_time)
                 # Only wait until synced space is acquired.
                 # swap_end is marked, but do not wait here.
                 # Max of CPU present in a pipelined way, preload buf ready.
-                # FIXME: Now wait for synced preload space to be completely ready.
+                # NOTE: Now wait for synced preload space to be completely ready.
                 if number_of_blocks_to_preload > read_buffer_blocks:
                     time_to_preload_start = max(make_space_rbuf_end_time, constraint_due_to_into_cpu_pipelined, time_to_preload_start_lower_bound)
                 else:
@@ -945,7 +953,7 @@ class KVStorageController(BaseEntity):
                 evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(0, 
                                                                                             number_of_blocks_to_preload,
                                                                                             timestamp, False, False)
-                # FIXME: Now just wait until enough space.
+                # NOTE: Now just wait until enough space.
                 time_to_preload_start = max(evict_end_time, synced_to_mem_end_time, time_to_preload_start_lower_bound)
         else:
             evict_end_time, evict_firlayer_time, evict_per_layer = self._kv_block_trie.synced_acquire_space(0,
@@ -1057,10 +1065,7 @@ class KVStorageController(BaseEntity):
             number_of_blocks_to_fetch * self._block_size, oracle_time_to_start_prefetch, self._num_layers)
         final_end_time = max(fetch_end_time, timestamp)
         self._delay_of_waiting_for_prefetch_before_preload += final_end_time - timestamp
-        # TODO: Print the profilings here, in a trace form.
-        # Then check if it is really that congested.
 
-        # print(f"End of prefetch is {fetch_end_time}")
         # for swapped space to be ready. 
         for node in fetch_list:
             assert node.color == 2
@@ -1078,26 +1083,37 @@ class KVStorageController(BaseEntity):
             assert replica_scheduler.replica_id != self._self_replica_id
             # NOTE: Currently do not update timestamps of other replicas.
             # NOTE: locality_check should return a length of hit tokens.
-            hit_token_length = replica_scheduler.locality_check(request)
+            # NOTE: Only possible to fetch if in CPU/DISK.
+            hit_token_length = replica_scheduler.locality_check(request, 1)
             if hit_token_length > max_hit_token_length:
                 max_hit_token_length = hit_token_length
                 max_hit_replica = replica_scheduler
         return max_hit_token_length, max_hit_replica
                 
-    def lookup(self, request, timestamp):
+    def lookup(self, request, timestamp, starting_layer_must_at_least: int = 0):
         # Can be remote.
         # if request.num_processed_tokens % self._block_size != 0:
         #     assert request.id in self._active_blocks
+        t1 = time.perf_counter()
         number_of_tokens_to_lookup = max(request.num_processed_tokens, request.num_prefill_tokens)
         number_of_blocks_to_lookup = number_of_tokens_to_lookup // self._block_size
         kvblock_list = request.full_kvblocks[:number_of_blocks_to_lookup]
         # Lru list has been updated in lookup.
         # Record hit.
         hit_trace: List[KVBlockTrieNode] = self._kv_block_trie.lookup(kvblock_list, timestamp)
+        if len(hit_trace) > 1:
+            if not hit_trace[1].present_in_this_or_lower(starting_layer_must_at_least):
+                # Just cut.
+                # Note that meaningful blocks start from 1.
+                # print("\nCUTTED\n")
+                self._remote_fetch_cut_due_to_gpu_prefix += 1
+                return [hit_trace[0]]
+        t2 = time.perf_counter()
+        self._lookup_clock_time += t2 - t1
         return hit_trace
     
-    def locality_check(self, request):
-        return (len(self.lookup(request, -1.0)) - 1) * self._block_size
+    def locality_check(self, request, starting_layer_must_at_least: int = 0):
+        return (len(self.lookup(request, -1.0, starting_layer_must_at_least)) - 1) * self._block_size
     
     # NOTE: Now fetch from remote device always to local CPU.
     # When write through is enabled, it should read from CPU && DISK.

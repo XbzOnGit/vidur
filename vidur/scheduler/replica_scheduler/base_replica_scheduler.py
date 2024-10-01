@@ -364,10 +364,10 @@ class BaseReplicaScheduler(ABC):
         return self._has_inter_request_kv_cahce and any([controller.scheduler_aware_eviction for controller in self._replica_kv_controllers])
 
     # Should return a token length.
-    def locality_check(self, request: Request):
+    def locality_check(self, request: Request, starting_layer_must_at_least: int = 0):
         # Check if the request is in the cache.
         if self._config.cache_lookup_type is None:
             return 0
         # NOTE: Now check by min.
-        return min([controller.locality_check(request) for controller in self._replica_kv_controllers 
+        return min([controller.locality_check(request, starting_layer_must_at_least) for controller in self._replica_kv_controllers 
                     if controller is not None])

@@ -62,7 +62,7 @@ class KVBlockTrieNode:
         # in min_heap --> evicted first.
         self._evict_timestamp = (-1, -self.depth)
 
-        # FIXME: Currently at most 3 layers.
+        # NOTE: Currently at most 3 layers.
         # (is_present, timestamp, first_layer_timestamp)
         self._storage_layer_info = [(False, -1.0, -1.0), (False, -1.0, -1.0), (False, -1.0, -1.0)]
         self._children_color_cnt = [0, 0, 0]
@@ -92,6 +92,14 @@ class KVBlockTrieNode:
                 return idx
             idx += 1
         return -1
+    
+    def present_in_this_or_lower(self, layer_no):
+        assert layer_no >= 0
+        assert layer_no < self._kvtrie.num_storage_layers
+        for i in range(layer_no, self._kvtrie.num_storage_layers):
+            if self._storage_layer_info[i][0]:
+                return True
+        return False
 
     @property
     def do_not_evict(self):
@@ -360,20 +368,15 @@ class KVBlockTrieNode:
         assert self.color >= 0
         self.assert_inside_reorder_kv_heap() # Do not insert
         # Anyway, need to remove from evict list of from_no layer cos color changed.
-        # print(f"{self.id} Remove from heap on fetch from {from_no} to {to_no}.")
         # Color changed, but perhaps it is not in heap before.
         if self.is_in_evict_heap:
             self.remove_from_evict_heap()
-        # print(f"timestamp of node {self.id} updated with {timestamp} for callback_on_fetch.")
         self.timestamp_update(timestamp)
         # Do not delete storage layer info of from_no, it is still there.
         # Update color.
         self._storage_layer_info[to_no] = (True, timestamp, layer_timestamp)
         # NOTE: Color can change.
         self.modify_reorder_kv_heap_on_color_change()
-        # print(f"{self.id}: {self._storage_layer_info}")
-        # print(f"Parent ID is {self.parent.id}")
-        # print(f"Parent color is {self.parent.color}")
         # Color changed from_no --> to_no(decreased).
         self.parent._children_color_cnt[from_no] -= 1
         assert self.parent._children_color_cnt[from_no] >= 0
@@ -391,10 +394,6 @@ class KVBlockTrieNode:
         # Cos there must be node not accessed, and must be leaf.
         # That leaf LRU is earlier than what we accessed before.
 
-
-        # TODO: Further improvement: Know the batch not request, 
-        # we can pre-access those already in GPU once, to make them 
-        # not evicted then loaded when preparing the batch.
     
     # [True, False, True]
     def callback_on_switch_to_layer0_tft(self, timestamp, layer_timestamp):
@@ -1044,15 +1043,12 @@ class KVBlockTrie:
                 assert self._used_blocks[layer_no] + block_number <= self._num_blocks[layer_no]
                 # assert self._used_blocks[layer_no] <= self._num_blocks[layer_no], f"Two: {self._used_blocks[layer_no]} > {self._num_blocks[layer_no]}"
                 # And evict to make space for read buffer.
-                # FIXME: Assume that the read buffer is available before the end execution of last batch.
-                # FIXME: Assume that write through is used, so evict time to get back read buffer is 0.
                 # The purpose here is to mark the space as free, so that read buffer is back.
                 # Also swap the space for read buffer.
 
-                # FIXME: Does this guarantee those loaded in here not evicted immediately?
                 if not allow_lower_write:
+                    # Just allow synced write.
                     evict_end, evict_fir, evict_per = self._evict_blocks(layer_no, should_make_space, timestamp, no_synced_write)
-                    # FIXME: What makes it non-zero.
                     # assert evict_per == 0
                     # assert evict_end == timestamp
                     # assert evict_fir == timestamp
