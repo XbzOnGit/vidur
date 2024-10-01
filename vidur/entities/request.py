@@ -72,8 +72,8 @@ class Request(BaseEntity):
         self._full_kvblocks = None
         self._first_token_time = 0.0
 
-        self._pdgsf_alpha_on_prefill = None
-        self._pdgsf_beta_on_prefill = None
+        self._last_cache_len_on_prefill = None
+        self._last_compute_len_on_prefill = None
 
         self._remove_ref_list = []
         self._done_inserted_remove_ref_idx = -1
@@ -428,8 +428,10 @@ class Request(BaseEntity):
         self._kv_inserted = False
         self._kv_fetch_time = 0
         self._kv_insert_time = 0
-
-        self._pdgsf_alpha_on_prefill = None
+        
+        self._last_cache_len_on_prefill = None
+        self._last_compute_len_on_prefill = None
+        
         self._pdgsf_beta_on_prefill = None
         for kv_controller in self._replica_scheduler.get_all_kv_controllers():
             # print(f"Request {self._id} restarting")
@@ -438,16 +440,16 @@ class Request(BaseEntity):
         self.cachedattention_window_update_on_complete_or_restart()
 
     @property
-    def pdgsf_alpha_on_prefill(self):
-        return self._pdgsf_alpha_on_prefill
+    def last_cache_len_on_prefill(self):
+        return self._last_cache_len_on_prefill
     
     @property
-    def pdgsf_beta_on_prefill(self):
-        return self._pdgsf_beta_on_prefill
+    def last_compute_len_on_prefill(self):
+        return self._last_compute_len_on_prefill
     
-    def set_pdgsf_alpha_on_prefill(self, alpha):
-        self._pdgsf_alpha_on_prefill = alpha
+    def set_last_cache_len_on_prefill(self, cache_len):
+        self._last_cache_len_on_prefill = cache_len
 
-    def set_pdgsf_beta_on_prefill(self, beta):
-        self._pdgsf_beta_on_prefill = beta
+    def set_last_compute_len_on_prefill(self, compute_len):
+        self._last_compute_len_on_prefill = compute_len
 

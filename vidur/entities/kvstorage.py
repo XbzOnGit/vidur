@@ -197,24 +197,9 @@ class KVStorageController(BaseEntity):
                 print(f"average fetch remote delay: {self._fetch_remote_delay / self._fetch_remote_cnt}")
         print("\n")
     
-    def on_batch_stage(self, batch_to_hack: Batch, timestamp) -> Tuple[Tuple[float, float], List[Tuple[int, KVBlockTrieNode]]]:
-        # print(f"\n\nBatch {batch_to_hack.id} starts to be hacked.")
-        # Return the timepoint ready to execute and the per layer preload time.
-        # Step 1. From num_processed to num_processed + num_tokens
-        # Only care about those num_processed tokens % block_size == 0.
-        # Now should RESET num_processed_tokens, cos it stands for KV cache.
-
-
-        # Cut block by block and lookup, then allocate active blocks for the rest.
-        # Step 2. Add overhead, hack requests and restore information.
-        # Step 3. Return the timepoint ready to execute to relica stage scheduler.
-
-        # It should execute and issue writes layer by layer.
-        # batch_stage_end should restore.
-
-        # print(f"On batch_stage timestamp: {timestamp}")
+    def _lookup_and_fetch_from_remote(self, batch_to_hack: Batch, timestamp):
         hit_traces = []
-        pgdsf_alpha_beta_info = []
+        cache_and_compute_len = []
         preload_set: Set[KVBlockTrieNode] = set()
         synced_fetch_from_disk_to_memory_set: Set[KVBlockTrieNode] = set()
         preload_list: List[KVBlockTrieNode] = []
@@ -224,7 +209,6 @@ class KVStorageController(BaseEntity):
         new_full_blocks_list: List[Tuple[int, KVBlockTrieNode]] = []
         end_first_layer_of_already_in_gpu = None
         bidx = 0
-        max_arrival_time = max([request.arrived_at for request in batch_to_hack.requests])
         end_fetch_disk_and_remote_time = None
         for request in batch_to_hack.requests:
             self._map_from_reqid_to_request[request.id] = request
@@ -296,12 +280,12 @@ class KVStorageController(BaseEntity):
                     # print(f"Remove {hit.id} from evict of layer {color}, due to hit.")
                     hit.remove_from_evict_heap()
             hit_length = len(hit_trace) - 1
-            if request.pdgsf_alpha_on_prefill is None:
-                request.set_pdgsf_alpha_on_prefill(hit_length * self._block_size)
-                request.set_pdgsf_beta_on_prefill(request.num_prefill_tokens - request.pdgsf_alpha_on_prefill)
-                pgdsf_alpha_beta_info.append((request.pdgsf_alpha_on_prefill, request.pdgsf_beta_on_prefill))
+            if request.last_cache_len_on_prefill is None:
+                request.set_last_cache_len_on_prefill(hit_length * self._block_size)
+                request.set_last_compute_len_on_prefill(request.num_prefill_tokens - request.last_cache_len_on_prefill)
+                cache_and_compute_len.append((request.last_cache_len_on_prefill, request.last_compute_len_on_prefill))
             else:
-                pgdsf_alpha_beta_info.append(None)
+                cache_and_compute_len.append(None)
             assert all(not hit.is_in_evict_heap for hit in hit_trace[1:])
             # print(f"Request {request.id} has hit length: {hit_length}\n\n")
             assert request.num_processed_tokens // self._block_size <= hit_length, f"{request.num_processed_tokens} // {self._block_size} > {hit_length}, id is {request.id}"
@@ -351,17 +335,14 @@ class KVStorageController(BaseEntity):
                 number_of_blocks_to_active_diff += current_active_block - self._active_blocks[request.id]
                 self._active_blocks[request.id] = current_active_block
             bidx += 1
-
-        # Lookup and timestamp update in trie && active blocks record in controller.
-        # Also add reference counter.
-
-        # for hit_trace in hit_traces:
-        #    for lno in range(self._kv_block_trie.num_storage_layers):
-        #        self._kv_block_trie.evict_list_try_push_in_reverse_order(hit_trace, lno)
-        # DEBUG:
         assert all([all(not hit.is_in_evict_heap for hit in hit_trace[1:]) for hit_trace in hit_traces])
         assert len(preload_list) == len(preload_set)
         assert len(synced_fetch_from_disk_to_memory_list) == len(synced_fetch_from_disk_to_memory_set)
+        return hit_traces, preload_list, synced_fetch_from_disk_to_memory_list,\
+              end_fetch_disk_and_remote_time, number_of_blocks_to_active_diff, new_full_blocks_list, cache_and_compute_len
+
+    
+    def move_to_cpu_or_higher(self, end_fetch_disk_and_remote_time, fetch_disk_to_cpu_list, timestamp, max_arrival_time):
         synced_to_mem_end_time = timestamp
         synced_to_mem_fir_time = timestamp
         synced_to_mem_per_layer_time = 0.0
@@ -375,31 +356,19 @@ class KVStorageController(BaseEntity):
                 synced_to_mem_per_layer_time = 0.0
             # Cos should have been fetched in previous function.
         if not self._disk_cpu_prefetch:
-            if len(synced_fetch_from_disk_to_memory_list) > 0:
-                synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.synced_fetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, timestamp)
+            if len(fetch_disk_to_cpu_list) > 0:
+                synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.synced_fetch_from_disk_to_memory(fetch_disk_to_cpu_list, timestamp)
         # Update timestamp cos it is synced, just as if time is passed there.
         else:
             # print(f"max arrival time is {max_arrival_time}, while timestamp is {timestamp}")
-            if len(synced_fetch_from_disk_to_memory_list) > 0:
-                synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.oracle_prefetch_from_disk_to_memory(synced_fetch_from_disk_to_memory_list, max_arrival_time, 
+            if len(fetch_disk_to_cpu_list) > 0:
+                synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = self.oracle_prefetch_from_disk_to_memory(fetch_disk_to_cpu_list, max_arrival_time, 
                                                                  timestamp)
+        return synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time
+    
 
-        # FIXME: Now launch eviction for active blocks together with preload blocks.
-        # It can be latter, allowing preload to start earlier.
-        
-
-        assert number_of_blocks_to_active_diff >= 0
-        # print(f"Number of blocks to active diff: {number_of_blocks_to_active_diff}\n\n")
-        # Space for active blocks have been made above.
-        # Active blocks marked in controller.
-        # Now mark in KVBlockTrie.
-
-        # Make space on the highest level.
-        # avb = self._kv_block_trie._num_blocks[0] - self._kv_block_trie._used_blocks[0]
-        # print("\n\n")
-        # print(avb)
-        # print(number_of_blocks_to_active_diff)
-        # print(f"Used block: {self._kv_block_trie._used_blocks[0]}")
+    def move_to_gpu(self, batch_to_hack, load_list, timestamp, to_mem_tuple, number_of_blocks_to_active_diff):
+        synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = to_mem_tuple
         msend = timestamp
         msfir = timestamp
         msper = 0.0
@@ -430,19 +399,23 @@ class KVStorageController(BaseEntity):
 
         # print("\n\n")
         # Space and time for active blocks.
-        ready_exec_per_layer, end_time = self.preload_into_GPU(batch_to_hack, preload_list, timestamp, 
+        ready_exec_per_layer, end_time = self.preload_into_GPU(batch_to_hack, load_list, timestamp, 
                                                                synced_to_mem_end_time, synced_to_mem_fir_time,
                                                                synced_to_mem_per_layer_time, msend, msfir, msper)
-            
-        # Have to wait for the whole batch to fetch, so set the batch fetch time on the node.
-        # Now hack the batch and store the restore information.
-        kv_hit_length_list = []
-        num_processed_tokens_list = []
-        should_reset_prefill_complete_list = []
-        batch_num_tokens_list = []
-        req_bidx = 0
-        # Now really change it.
+        return ready_exec_per_layer, end_time
+    
 
+    def eviction_update_after_loading(self, hit_block, aux):
+        if self._kv_block_trie.is_pgdsf_eviction[0]:
+            cache_and_compute_len, rhidx = aux
+            h = hit_block
+            # def pgdsf_update(self, exec_time_of_request, beta, is_cached, layer_no):
+            if cache_and_compute_len[rhidx] is not None:
+                # not None means alpha is None before, first time.
+                # Here update one time for hit blocks on each request.
+                h.pgdsf_update(-1, -1, True, h.color)
+
+    def unpin_and_update_after_load(self, hit_traces, cache_and_compute_len):
         # Now everything should be in GPU.
         # And no more eviction in this batch.
         # Before switching into cache, only the last one in hit trace possible to be evictable.
@@ -453,14 +426,7 @@ class KVStorageController(BaseEntity):
                 assert h.color == 0
                 # Note that there can be the same block in different hit traces.
                 # So do not assert do_not_evict here.
-
-                # NOTE: Update pgdsf here, when they all changed color.
-                if self._kv_block_trie.is_pgdsf_eviction[0]:
-                    # def pgdsf_update(self, exec_time_of_request, beta, is_cached, layer_no):
-                    if pgdsf_alpha_beta_info[rhidx] is not None:
-                        # not None means alpha is None before, first time.
-                        # Here update one time for hit blocks on each request.
-                        h.pgdsf_update(-1, -1, True, h.color)
+                self.eviction_update_after_loading(h, (cache_and_compute_len, rhidx))
                 h.set_do_not_evict(False)
             if h_len > 0:
                 last_hit: KVBlockTrieNode = h_tr[h_len]
@@ -470,6 +436,17 @@ class KVStorageController(BaseEntity):
                 # if last_hit.is_in_evict_heap:
                 #     print(f"Add {last_hit.id} to evict of layer {last_hit.color} after possible leaf change.")
             rhidx += 1
+
+
+    def modify_batch(self, batch_to_hack: Batch, hit_traces, end_time, new_full_blocks_list):
+         # Have to wait for the whole batch to fetch, so set the batch fetch time on the node.
+        # Now hack the batch and store the restore information.
+        kv_hit_length_list = []
+        num_processed_tokens_list = []
+        should_reset_prefill_complete_list = []
+        batch_num_tokens_list = []
+        req_bidx = 0
+        # Now really change it.
                 
         # Hack && restore ALL related indirect numbers of 
         # num_processed_tokens and prefill_complete and prefill_complete_time, num_tokens of batch.
@@ -499,6 +476,44 @@ class KVStorageController(BaseEntity):
             req_bidx += 1
         # Filter new_full_blocks_list to only take those really need.
         batch_to_hack.set_restore_between_stages(kv_hit_length_list, num_processed_tokens_list, should_reset_prefill_complete_list, batch_num_tokens_list, new_full_blocks_list)
+    
+    def on_batch_stage(self, batch_to_hack: Batch, timestamp) -> Tuple[Tuple[float, float], List[Tuple[int, KVBlockTrieNode]]]:
+        # Return the timepoint ready to execute and the per layer preload time.
+        # Step 1. From num_processed to num_processed + num_tokens
+        # Only care about those num_processed tokens % block_size == 0.
+        # num_processed_tokens is KV cache hit length + active blocks.
+
+        # Cut block by block and lookup, then allocate active blocks for the rest.
+        # Step 2. Add overhead, hack requests and restore information.
+        # Step 3. Return the timepoint ready to execute to relica stage scheduler.
+
+
+        max_arrival_time = max([request.arrived_at for request in batch_to_hack.requests])
+        hit_traces, preload_list, synced_fetch_from_disk_to_memory_list, \
+            end_fetch_disk_and_remote_time, number_of_blocks_to_active_diff, new_full_blocks_list, cache_and_compute_len = \
+                  self._lookup_and_fetch_from_remote(batch_to_hack, timestamp)
+        
+        synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time = \
+        self.move_to_cpu_or_higher(end_fetch_disk_and_remote_time, synced_fetch_from_disk_to_memory_list, timestamp, max_arrival_time)
+
+        # FIXME: Now launch eviction for active blocks together with preload blocks.
+        # It can be latter, allowing preload to start earlier.
+        
+
+        assert number_of_blocks_to_active_diff >= 0
+        # print(f"Number of blocks to active diff: {number_of_blocks_to_active_diff}\n\n")
+        # Space for active blocks have been made above.
+        # Active blocks marked in controller.
+        # Now mark in KVBlockTrie.
+
+        # Make space on the highest level.
+        ready_exec_per_layer, end_time = \
+        self.move_to_gpu(batch_to_hack, preload_list, timestamp, \
+                         (synced_to_mem_end_time, synced_to_mem_fir_time, synced_to_mem_per_layer_time), \
+                            number_of_blocks_to_active_diff)
+        
+        self.unpin_and_update_after_load(hit_traces, cache_and_compute_len)
+        self.modify_batch(batch_to_hack, hit_traces, end_time, new_full_blocks_list)
         return ready_exec_per_layer, new_full_blocks_list
 
     def set_other_replicas(self, other_replicas, p2p_bandwidth_between_nodes):
@@ -687,7 +702,7 @@ class KVStorageController(BaseEntity):
             
             if self._kv_block_trie.is_pgdsf_eviction[0]:
                 the_req = self._map_from_reqid_to_request[reqid]
-                alpha = the_req.pdgsf_alpha_on_prefill
+                alpha = the_req.last_cache_len_on_prefill
                 # root depth is 0.
                 beta = the_node.depth * self._block_size - alpha
                 assert beta >= 0
