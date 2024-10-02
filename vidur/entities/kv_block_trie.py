@@ -137,10 +137,13 @@ class KVBlockTrieNode:
     @property
     def is_leaf(self):
         # Color of itself && color of children.
+        color = self.color
+        if color < 0:
+            # Should not be in trie at all, at least temporarily.
+            return False
         if self._kvtrie.allow_reorder_kv_blocks:
             # Any node is leaf, allow eviction.
             return True
-        color = self.color
         # [0, color]
         i = 0
         while i < color:
@@ -279,9 +282,10 @@ class KVBlockTrieNode:
                     assert self.color == 2
                     self._evict_timestamp = (self._cachedattention_in_disk_eviction_window, timestamp)
         assert not self.do_not_evict
-        if not self._kvtrie.scheduler_aware_eviction or self.color == 0:
-            assert self.evict_timestamp[0] >= 0
-            assert self.evict_timestamp[1] < 0
+        # Do not assert >= 0, it can be temporarily < 0.
+        # if not self._kvtrie.scheduler_aware_eviction or self.color == 0:
+        #     assert self.evict_timestamp[0] >= 0
+        #     assert self.evict_timestamp[1] < 0
         # assert self.evict_timestamp[0] >= 0, f"{self.evict_timestamp}, id: {self.id}, layer: {self.color}"
         # It can be < 0, if not in eviction window.
         # assert self.evict_timestamp[1] < 0
@@ -327,6 +331,7 @@ class KVBlockTrieNode:
                     self.add_self_to_evict_heap()
 
     def modify_reorder_kv_heap_on_color_change(self):
+        # When color is -1, will be in root, and popped later.
         if self._kvtrie.block_tokens_to_nodes is not None:
             if self._position_in_reorder_kv_heap >= 0:
                 the_heap_of_reorder: Heap = self._kvtrie.block_tokens_to_nodes[self.tokens]
@@ -374,25 +379,7 @@ class KVBlockTrieNode:
         self.timestamp_update(timestamp)
         # Do not delete storage layer info of from_no, it is still there.
         # Update color.
-        self._storage_layer_info[to_no] = (True, timestamp, layer_timestamp)
-        # NOTE: Color can change.
-        self.modify_reorder_kv_heap_on_color_change()
-        # Color changed from_no --> to_no(decreased).
-        self.parent._children_color_cnt[from_no] -= 1
-        assert self.parent._children_color_cnt[from_no] >= 0
-        assert self.parent._children_color_cnt[to_no] >= 0
-        self.parent._children_color_cnt[to_no] += 1
-        # Can make parent no longer a leaf.
-        self.parent.callback_on_possible_leaf_change()
-        # Can make itself a leaf, add to list.
-        # It should be the latest one to access, which is the tail.
-        # This is reasonable because when we fetch it, it should be important.
-        self.callback_on_possible_leaf_change()
-        # Once the batch does not exceed GPU memory, 
-        # and when eviction is triggered on GPU, 
-        # previous ones fetched to GPU are naturally pinned.
-        # Cos there must be node not accessed, and must be leaf.
-        # That leaf LRU is earlier than what we accessed before.
+        self.set_storage_layer_info_timestamps(to_no, timestamp, layer_timestamp)
 
     
     # [True, False, True]
@@ -405,18 +392,7 @@ class KVBlockTrieNode:
             self.remove_from_evict_heap()
         # print(f"timestamp of node {self.id} updated with {timestamp} for callback_on_switch_to_layer0_tft.")
         self.timestamp_update(timestamp)
-        self._storage_layer_info[0] = (True, timestamp, layer_timestamp)
-        # NOTE: Color can change.
-        if not self.check_if_inside_reorder_kv_heap():
-            self.insert_into_reorder_kv_heap()
-        else:
-            self.modify_reorder_kv_heap_on_color_change()
-        self.parent._children_color_cnt[2] -= 1
-        assert self.parent._children_color_cnt[2] >= 0
-        assert self.parent._children_color_cnt[0] >= 0
-        self.parent._children_color_cnt[0] += 1
-        self.parent.callback_on_possible_leaf_change()
-        self.callback_on_possible_leaf_change()
+        self.set_storage_layer_info_timestamps(0, timestamp, layer_timestamp)
 
     # NOTE: When a node is pushed to lower layer in write-through, no color change at all.
     # So no leaf change and candidate changes.
@@ -428,12 +404,7 @@ class KVBlockTrieNode:
             assert self._storage_layer_info[to_no][1] <= timestamp
             assert self._storage_layer_info[to_no][2] <= layer_timestamp
         else:
-            color_before = self.color
-            self._storage_layer_info[to_no] = (True, timestamp, layer_timestamp)
-            color_after = self.color
-            assert color_before == color_after
-            # No color change.
-            # So no leaf change.
+            self.set_storage_layer_info_timestamps(to_no, timestamp, layer_timestamp)
     
     def timestamp_update(self, new_access_time):
         color = self.color
@@ -462,8 +433,6 @@ class KVBlockTrieNode:
                     self.sift_up_evict_heap(False)
                 else:
                     self.sift_down_evict_heap(False)
-        # if self.id == 1581:
-        #     print(f"Update timestamp on node {self.id} with color {self.color}, with new timestamp {new_access_time}, in the end: {self.evict_timestamp}")
                 
 
     def set_pgdsf_priority(self, layer_no):
@@ -535,37 +504,52 @@ class KVBlockTrieNode:
         assert not self.is_in_evict_heap # Should have been removed from list in evict_selection.
         # self.remove_from_evict_heap()
         # Update color.
-        self._storage_layer_info[from_no] = (False, -1.0, -1.0)
+        self.set_storage_layer_info_timestamps(from_no, -1.0, -1.0, False)
         # Swap out once always true.
         if self._storage_layer_info[to_no][0]:
             assert self._storage_layer_info[to_no][1] <= timestamp
             assert self._storage_layer_info[to_no][2] <= layer_timestamp
         else:
-            self._storage_layer_info[to_no] = (True, timestamp, layer_timestamp)
-        if not self.check_if_inside_reorder_kv_heap():
-            self.insert_into_reorder_kv_heap()
-        # NOTE: Color can change.
-        self.modify_reorder_kv_heap_on_color_change()
-        # Even if already inside, still color change.
-        # Color changed from_no --> to_no(increased).
-        self.parent._children_color_cnt[from_no] -= 1
-        assert self.parent._children_color_cnt[from_no] >= 0
-        assert self.parent._children_color_cnt[to_no] >= 0
-        self.parent._children_color_cnt[to_no] += 1
-        # Can make parent a leaf, add to evict_list.
-        self.parent.callback_on_possible_leaf_change()
-        # Can make itself no longer a leaf, remove from evict_list.
-        self.callback_on_possible_leaf_change()
+            self.set_storage_layer_info_timestamps(to_no, timestamp, layer_timestamp)
     
-    def set_storage_layer_info_timestamps(self, layer_no, timestamp, layer_timestamp):
+    def set_storage_layer_info_timestamps(self, layer_no, timestamp, layer_timestamp, set_value = True):
         # assert self._storage_layer_info[layer_no][0], f"{self.id} {layer_no}"
         # assert self._storage_layer_info[layer_no][1] == float("inf")
         # assert self._storage_layer_info[layer_no][2] == float("inf")
-        self._storage_layer_info[layer_no] = (True, timestamp, layer_timestamp)
-        if not self.check_if_inside_reorder_kv_heap():
-            self.insert_into_reorder_kv_heap()
-        # NOTE: Color can change.
-        self.modify_reorder_kv_heap_on_color_change()
+        original_color = self.color
+        if not set_value:
+            self._storage_layer_info[layer_no] = (False, -1.0, -1.0)
+        else:
+            self._storage_layer_info[layer_no] = (True, timestamp, layer_timestamp)
+            if not self.check_if_inside_reorder_kv_heap():
+                self.insert_into_reorder_kv_heap()
+            # NOTE: Color can change(not always).
+            self.modify_reorder_kv_heap_on_color_change()
+        current_color = self.color
+        if original_color >= 0 and current_color >= 0:
+            if original_color != current_color:
+                # Modify parent.
+                self.parent._children_color_cnt[original_color] -= 1
+                assert self.parent._children_color_cnt[original_color] >= 0
+                assert self.parent._children_color_cnt[current_color] >= 0
+                self.parent._children_color_cnt[current_color] += 1
+                self.parent.callback_on_possible_leaf_change()
+                self.callback_on_possible_leaf_change()
+        elif original_color >= 0:
+            assert current_color < 0
+            self.parent._children_color_cnt[original_color] -= 1
+            assert self.parent._children_color_cnt[original_color] >= 0
+            self.parent.callback_on_possible_leaf_change()
+            self.callback_on_possible_leaf_change()
+        elif current_color >= 0:
+            assert original_color < 0
+            assert self.parent is not None
+            assert self.parent._children_color_cnt[current_color] >= 0
+            self.parent._children_color_cnt[current_color] += 1
+            self.parent.callback_on_possible_leaf_change()
+            self.callback_on_possible_leaf_change()
+        else:
+            raise ValueError("In set_storage_layer_info_timestamps, both original_color and current_color are -1.")
 
     
     def callback_on_insert_into_gpu(self, timestamp, layer_timestamp):
@@ -576,21 +560,10 @@ class KVBlockTrieNode:
         # Should be new in trie.
         assert len(self.children) == 0
         assert not self.is_in_evict_heap # A new node, updated later in callback_on_possible_leaf_change.
-        self._storage_layer_info[0] = (True, timestamp, layer_timestamp)
-        if not self.check_if_inside_reorder_kv_heap():
-            self.insert_into_reorder_kv_heap()
-        # NOTE: Color can change.
-        self.modify_reorder_kv_heap_on_color_change()
+        self.set_storage_layer_info_timestamps(0, timestamp, layer_timestamp)
         # Update timestamps.
         # print(f"timestamp of node {self.id} updated with {timestamp} for callback_on_insert_into_gpu.")
         self.timestamp_update(timestamp)
-        # print(f"Insert into GPU: {self.id}, evict_timestamp: {self.evict_timestamp}")
-        # Color changed -1 --> 0.
-        assert self.parent is not None
-        assert self.parent._children_color_cnt[0] >= 0
-        self.parent._children_color_cnt[0] += 1
-        self.parent.callback_on_possible_leaf_change()
-        self.callback_on_possible_leaf_change()
 
 
         
@@ -605,12 +578,7 @@ class KVBlockTrieNode:
         assert len(child_node.children) == 0
         self.children[child_node.tokens] = child_node
         assert child_node.parent == self
-        child_color = child_node.color
-        assert child_color >= 0
-        assert self._children_color_cnt[child_color] >= 0
-        self._children_color_cnt[child_color] += 1
-        self.callback_on_possible_leaf_change()
-        child_node.callback_on_possible_leaf_change()
+        # Color info should have been recorded in set_storage_layer_info_timestamps.
         
 
     
@@ -618,8 +586,6 @@ class KVBlockTrieNode:
         color = self.color
         assert color > 0, f"color: {color}" # Only fetch to higher if not there.
         higher_level_no = color - 1
-        # print(f"Fetch {self.id} from {color} to {higher_level_no}.")
-        # print(f"Before fetch: {self._storage_layer_info}\n")
         self.callback_on_fetch(color, higher_level_no, complete_timestamp, complete_layer_timestamp)
         return higher_level_no
 
@@ -651,17 +617,11 @@ class KVBlockTrieNode:
         assert color == self._kvtrie.num_storage_layers - 1
         assert self._refcnt == 0
         assert not self.is_in_evict_heap # Should have been removed from list in evict_selection.
-        self._storage_layer_info[color] = (False, -1.0, -1.0)
+        self.set_storage_layer_info_timestamps(color, -1.0, -1.0, False)
         # NOTE: color will change to -1, just pop from heap.
         assert self.color == -1
         self.assert_inside_reorder_kv_heap()
         self.pop_self_from_reorder_kv_heap_on_evict_to_discard()
-        self.parent._children_color_cnt[color] -= 1
-        assert self.parent._children_color_cnt[color] >= 0
-        self.parent.callback_on_possible_leaf_change()
-        # For self, have been removed from evict list.
-        # Delete node outside from parent children.
-        # print(f"After evict to discard, color of {self.id} is {self.color}")
    
     def check_if_color_present(self, location_id):
         return self._storage_layer_info[location_id][0]

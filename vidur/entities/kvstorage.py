@@ -1169,6 +1169,7 @@ class KVStorageController(BaseEntity):
             # Set node property on evict timestamp && storage layer info.
             # NOTE: Transmission here might not be by layer.
             # Like in cachegen, it is by chunk of token(in token dimension), so fir layer is end of all.
+            # Here, the parent should have changed information about children color, and leaf or not.
             new_node.set_storage_layer_info_timestamps(1, end_network_fetch_time, end_network_fetch_time)
             # print(f"timestamp of node {new_node.id} updated with {timestamp} for remote fetch.")
             new_node.timestamp_update(timestamp)
