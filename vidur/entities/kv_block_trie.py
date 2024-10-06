@@ -652,6 +652,12 @@ class KVBlockTrieNode:
             if self.color == last_layer_no:
                 assert not self.is_in_evict_heap
                 self.callback_on_possible_leaf_change()
+            if self._storage_layer_info[0][0]:
+                if self._kvtrie.discard_in_gpu_on_complete:
+                    # Move it away from GPU.
+                    # Given that always together with write-through, just mark it as not present and free space.
+                    self.set_storage_layer_info_timestamps(0, -1.0, -1.0, False)
+                    self._kvtrie.direct_free_memory(0, 1)
 
     @property
     def refcnt(self):
@@ -669,7 +675,8 @@ class KVBlockTrieNode:
 # Model channels outside the trie, this is only information about it.
 class KVBlockTrie:
     def __init__(self, layer_pipeline: bool, block_size, num_layers: int, 
-                 disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, allow_reorder_kv_blocks: bool):
+                 disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, allow_reorder_kv_blocks: bool, 
+                 discard_in_gpu_on_complete: bool):
         self.root = KVBlockTrieNode(None, tuple(), self, 0)
         print(f"scheduler-aware prefetch: {disk_cpu_prefetch}")
         print(f"scheduler-aware eviction: {scheduler_aware_eviction}")
@@ -734,11 +741,17 @@ class KVBlockTrie:
 
         self._blocks_extended_by_reorder = 0
 
+        self._dicard_in_gpu_on_complete = discard_in_gpu_on_complete
+
         atexit.register(self.dump_stats)
 
     def set_cachedattention_newest_mark(self, value):
         self._cachedattention_newest_mark = value
     
+    @property
+    def discard_in_gpu_on_complete(self):
+        return self._dicard_in_gpu_on_complete
+
     @property
     def cachedattention_newest_mark(self):
         return self._cachedattention_newest_mark

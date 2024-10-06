@@ -336,6 +336,11 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         metadata={"help": "GPU write through CPU."},
         # no/async/sync
     )
+    cpu_write_through_remote_server: str = field(
+        default="no",
+        metadata={"help": "CPU write through remote server."},
+        # no/async/sync
+    )
     read_buffer_fraction: float = field(
         default=0.1,
         metadata={"help": "Read buffer fraction."},
@@ -389,7 +394,42 @@ class BaseReplicaSchedulerConfig(BasePolyConfig):
         default=False,
         metadata={"help": "Allow reorder kv blocks."},
     )
-
+    discard_in_gpu_on_complete: bool = field(
+        default=False,
+        metadata={"help": "Discard in GPU on complete."},
+    )
+    # Now LMCache with local_device: cpu, local backend.
+    '''
+    # NOTE: Once this is specified, fetch from remote always goes through this.
+    central_server_cpu_capacity: str = field(
+        default="",
+        metadata={"help": "Central server CPU capacity."},
+    )
+    central_server_disk_capacity: str = field(
+        default="",
+        metadata={"help": "Central server disk capacity."},
+    )
+    # TODO:
+    upload_to_central_server_bandwidth: str = field(
+        default="",
+        metadata={"help": "Upload to central server bandwidth."},
+    )
+    download_from_central_server_bandwidth: str = field(
+        default="",
+        metadata={"help": "Download from central server bandwidth."},
+    )
+    central_server_cpu_disk_thput: str = field(
+        default="",
+        metadata={"help": "Central server CPU disk throughput."},
+    )
+    # full or half.
+    central_server_network_duplex: str = field(
+        default="full",
+        metadata={"help": "Central server duplex."},
+    )
+    # These TODOs with write through to CPU should be the same
+    # with LMCache with local_device: cpu, hybrid backend, not pipelined.
+    '''
 
 
 

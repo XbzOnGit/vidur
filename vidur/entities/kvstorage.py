@@ -17,13 +17,18 @@ class KVStorageController(BaseEntity):
     def __init__(self, block_size, layer_pipeline: bool, num_layers_per_node: int, read_pipeline_buffer: bool, 
                  gpu_write_through_cpu: str, disk_cpu_prefetch: bool, scheduler_aware_eviction: bool, execution_time_predictor, 
                  pipeline_stage_id: int, quant_kv: bool, quant_ratio: float, decode_place: str, decode_speed: float, encode_speed: float,
-                 self_replica_id: int, space_per_token_per_layer_before_quant: int, allow_reorder_kv_blocks: bool):
+                 self_replica_id: int, space_per_token_per_layer_before_quant: int, allow_reorder_kv_blocks: bool, 
+                 discard_in_gpu_on_complete: bool):
         # Now always fetch the longest path.
         self._id = KVStorageController.generate_id()
+        if discard_in_gpu_on_complete:
+            assert gpu_write_through_cpu.upper() != "NO"
+            # Must have write through.
       
         self._kv_block_trie = KVBlockTrie(layer_pipeline, block_size, num_layers_per_node, 
                                             disk_cpu_prefetch, 
-                                            scheduler_aware_eviction, allow_reorder_kv_blocks) # Only this storage, and everything on this.
+                                            scheduler_aware_eviction, allow_reorder_kv_blocks, 
+                                            discard_in_gpu_on_complete) # Only this storage, and everything on this.
         self._block_size = block_size
         self._active_blocks = {} # From reqid to number of active blocks.
         # Note that do not need to record the block here, cos its content can be gotten from request.tokens.
@@ -83,6 +88,9 @@ class KVStorageController(BaseEntity):
         self._fetch_remote_delay = 0.0
 
         self._block_number_acquire_space_active_blocks = 0
+
+
+        self._discard_in_gpu_on_complete = discard_in_gpu_on_complete
 
         atexit.register(self.dump_stats)
 
