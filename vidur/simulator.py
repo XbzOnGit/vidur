@@ -41,6 +41,7 @@ class Simulator:
         
         self._request_generator = None
         self._jsonl_trace_file = self._config.jsonl_trace_file
+        self._time_scale_factor = self._config.time_scale_factor
         if len(self._jsonl_trace_file) == 0:
             self._request_generator = RequestGeneratorRegistry.get(
                 self._config.request_generator_config.get_type(),
@@ -150,7 +151,7 @@ class Simulator:
                     req_dict = json.loads(line)
                     total_len = len(req_dict["tokens"])
                     tokens = req_dict["tokens"]
-                    arrived_at = req_dict["arrived_at"]
+                    arrived_at = req_dict["arrived_at"] * self._time_scale_factor
                     num_decode_tokens = req_dict["num_decode_tokens"]
                     num_prefill_tokens = total_len - num_decode_tokens
                     assert num_prefill_tokens > 0 and num_decode_tokens > 0

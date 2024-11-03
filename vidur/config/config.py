@@ -756,6 +756,10 @@ class SimulationConfig(ABC):
         default=None,
         metadata={"help": "Path to the jsonl trace file."},
     )
+    time_scale_factor: float = field(
+        default=1.0,
+        metadata={"help": "Time scale factor."},
+    )
     request_generator_config: BaseRequestGeneratorConfig = field(
         default_factory=SyntheticRequestGeneratorConfig,
         metadata={"help": "Request generator config."},
