@@ -242,6 +242,7 @@ class CacheEngine(BaseEntity):
                 assert evicted_item is not None, "DROP must have evicted item."
             elif evict_op == EvictOpType.COMPRESS:
                 evicted_item = evict_operand[0]
+                # print(f"evict compress copies: {evicted_item.storage_info.copies}")
                 assert evicted_item is not None, "COMPRESS must have evicted item."
             else:
                 raise ValueError(f"Unsupported evict op: {evict_op}")
@@ -254,8 +255,8 @@ class CacheEngine(BaseEntity):
                 evict_op = EvictOpType.DROP
             evict_op_return_time = cur_time
             # print(f"remove from backend_no: {backend_no}, evicted_item: {evicted_item._id}")
-            assert self._storage_backends[backend_no][0].remove(evicted_item)
             if evict_op == EvictOpType.WRITE_TO_LOWER:
+                assert self._storage_backends[backend_no][0].remove(evicted_item)
                 assert not have_in_next_layer
                 make_space_end = cur_time
                 if evicted_item.size > self._storage_backends[backend_no + 1][1]:
@@ -299,10 +300,12 @@ class CacheEngine(BaseEntity):
                 compression_level = evict_operand[1]
                 assert compression_level != 0
                 assert evicted_item.compression_level == 0
+                # print(f"evict compress before transform: {evicted_item.storage_info.copies}")
                 transform_end_time = self._transform(cur_time, 0, compression_level, evicted_item, backend_no, True, True)
                 evict_op_return_time = max(evict_op_return_time, transform_end_time)
                 evict_make_space = evicted_item.size * (1 - get_compress_level_manager().get_compress_rate(compression_level))
             elif evict_op == EvictOpType.DROP:
+                assert self._storage_backends[backend_no][0].remove(evicted_item)
                 evict_make_space = evicted_item.size
             else:
                 raise ValueError(f"Unsupported evict op: {evict_op}")
@@ -367,11 +370,13 @@ class CacheEngine(BaseEntity):
         if from_compress_level == 0 and to_compress_level == 0:
             return cur_time
         assert blocking, "Now only support blocking transform."
+        compress_level_manager = get_compress_level_manager()
+        ratio = compress_level_manager.multiply_rate_from_to(from_compress_level, to_compress_level)
         if backend_no != 0 and not replace_original:
             assert blocking, "Now only support blocking transform."
-            cur_time = self._make_space(cur_time, kv_obj.size, backend_no)
+            new_size = int(kv_obj.size * ratio)
+            cur_time = self._make_space(cur_time, new_size, backend_no)
         transform_time = 0
-        compress_level_manager = get_compress_level_manager()
         if to_compress_level == 0:
             transform_time = compress_level_manager.get_decompress_time(kv_obj.chunk_token_len, kv_obj.compression_level)
         else:
@@ -382,26 +387,27 @@ class CacheEngine(BaseEntity):
         else:
             transform_launch_time, transform_time = self._cpu_compute_device.compute(transform_time, cur_time)
         transform_end_time = transform_launch_time + transform_time
-        ratio = compress_level_manager.multiply_rate_from_to(from_compress_level, to_compress_level)
         transform_end_event = ComputeEndEvent(transform_end_time, [], None)
         new_kv_obj = KVObjectMetadata(kv_obj.prefix_hash, kv_obj.hash_value, 
                                       kv_obj.prefix_token_len, kv_obj.chunk_token_len,
-                                      kv_obj.size * ratio, to_compress_level, StorageInfoType.ARRIVING,
+                                      int(kv_obj.size * ratio), to_compress_level, StorageInfoType.ARRIVING,
                                       transform_end_event
                                       )
-        
+        # print(f"id from {kv_obj._id} to {new_kv_obj._id}, transform from {from_compress_level} to {to_compress_level}, size: {kv_obj.size}, new size: {new_kv_obj.size}")
         evictor: BaseEvictor = self._evictors[backend_no]
-        evictor.update_on_transform(kv_obj, new_kv_obj) # Copy eviction data like frequency.
-        transform_end_event.append_item(new_kv_obj)
+        evictor.update_on_transform(kv_obj, new_kv_obj, cur_time) # Copy eviction data like frequency.
+        if backend_no != 0:
+            transform_end_event.append_item(new_kv_obj)
         # Update index and space.
         if replace_original:
             if backend_no != 0:
                 assert self._storage_backends[backend_no][0] is not None
+                # print(f"{kv_obj.storage_info.copies}\n\n")
                 assert self._storage_backends[backend_no][0].remove(kv_obj)
                 self._storage_backends[backend_no][1] += kv_obj.size
         if backend_no != 0:
             assert self._storage_backends[backend_no][0] is not None
-            assert self._storage_backends[backend_no][0].put(kv_obj)
+            assert self._storage_backends[backend_no][0].put(new_kv_obj)
             self._storage_backends[backend_no][1] -= new_kv_obj.size
         global_simulator = self._simulator
         global_simulator.add_events([transform_end_event])
@@ -516,6 +522,7 @@ class CacheEngine(BaseEntity):
         chunk_tuple = self._chunk_tokens(tokens)
         # print(f"chunks number: {len(chunk_tuple)}")
         current_hash = ""
+        # print(f"one req chunk number: {len(chunk_tuple)}")
         for chunk_id, chunk in enumerate(chunk_tuple):
             prefix_hash = current_hash
             prefix_token_len = chunk_id * self._chunk_size
@@ -534,7 +541,6 @@ class CacheEngine(BaseEntity):
             if skip:
                 # print("store one chunk skipped\n")
                 continue    
-            # print("store one chunk not skipped\n")
             # Store to fast device(CPU) first, not compressed.
             kv_size = self._kv_size_calculator.get_kv_size(len(chunk), 0)
             to_device = self._cpu_dev_index if self._cpu_memory_size > 0 else self._disk_dev_index
@@ -555,6 +561,7 @@ class CacheEngine(BaseEntity):
                                       0, 
                                       StorageInfoType.ARRIVING,
                                       trans_end_event)
+            # print(f"store one chunk not skipped, {kv_obj._id}\n")
             # update_on_put.
             if self._evictors[to_no] is not None:
                 evictor: BaseEvictor = self._evictors[to_no]

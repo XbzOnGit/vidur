@@ -63,6 +63,8 @@ class KVObjectMetadata:
         self._associated_event = associated_event
         self._evictor_data = None
         self._storage_info = None
+        # if compression_level != 0:
+        #     print(f"{self._id} is compressed to {compression_level}")
     @property
     def evictor_data(self):
         return self._evictor_data
@@ -142,6 +144,7 @@ class StorageInfo:
             else:
                 self.copies[kv_object_meta.compression_level][kv_object_meta.status] = {kv_object_meta}
         else:
+            # print(f"add new copy {kv_object_meta._id}")
             self.copies[kv_object_meta.compression_level] = {kv_object_meta.status: {kv_object_meta}}
         kv_object_meta.set_storage_info(self)
         return True
@@ -150,12 +153,15 @@ class StorageInfo:
         assert kv_object_metadata.compression_level in self.copies
         assert kv_object_metadata.status in self.copies[kv_object_metadata.compression_level]
         assert kv_object_metadata in self.copies[kv_object_metadata.compression_level][kv_object_metadata.status]
+        # print(f"Removing copy {kv_object_metadata._id}: ori len {len(self.copies)}")
         self.copies[kv_object_metadata.compression_level][kv_object_metadata.status].remove(kv_object_metadata)
         if len(self.copies[kv_object_metadata.compression_level][kv_object_metadata.status]) == 0:
             del self.copies[kv_object_metadata.compression_level][kv_object_metadata.status]
             if len(self.copies[kv_object_metadata.compression_level]) == 0:
                 del self.copies[kv_object_metadata.compression_level]
-        kv_object_metadata.set_evictor_data(None)
+        # print(f", aft len: {len(self.copies)}")
+        # Might use this in update_on_transfer, or mark_ready.
+        # kv_object_metadata.set_evictor_data(None)
         kv_object_metadata.set_storage_info(None)
         return True
 
@@ -164,14 +170,11 @@ class StorageInfo:
     
     def mark_ready(self, kv_obj_metadata: KVObjectMetadata) -> bool:
         assert kv_obj_metadata.status == StorageInfoType.ARRIVING
-        save_evictor_data = kv_obj_metadata.evictor_data
         self.remove_copy(kv_obj_metadata)
         kv_obj_metadata.update_status(StorageInfoType.READY)
         assert kv_obj_metadata.associated_event is not None
         kv_obj_metadata.update_associated_event(None)
         self.add_copy(kv_obj_metadata)
-        # NOTE: Get the evictor_data back.
-        kv_obj_metadata.set_evictor_data(save_evictor_data)
         assert kv_obj_metadata.status == StorageInfoType.READY
         # print(f"id: {kv_obj_metadata._id} is ready.")
         return True
