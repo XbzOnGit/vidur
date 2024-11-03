@@ -152,8 +152,6 @@ class Simulator:
                     tokens = req_dict["tokens"]
                     arrived_at = req_dict["arrived_at"]
                     num_decode_tokens = req_dict["num_decode_tokens"]
-                    # TODO: REMOVE THIS!!
-                    num_decode_tokens = 1
                     num_prefill_tokens = total_len - num_decode_tokens
                     assert num_prefill_tokens > 0 and num_decode_tokens > 0
                     request = Request(arrived_at, num_prefill_tokens, num_decode_tokens, tokens, 
