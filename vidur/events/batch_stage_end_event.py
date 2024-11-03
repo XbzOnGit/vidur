@@ -36,12 +36,22 @@ class BatchStageEndEvent(BaseEvent):
         from vidur.events.batch_end_event import BatchEndEvent
         from vidur.events.batch_stage_arrival_event import BatchStageArrivalEvent
         from vidur.events.replica_stage_schedule_event import ReplicaStageScheduleEvent
-
-        scheduler.get_replica_stage_scheduler(
+        stage_scheduler = scheduler.get_replica_stage_scheduler(
             self._replica_id, self._stage_id
-        ).on_stage_end()
-
+        )
+        stage_scheduler.on_stage_end()
         self._batch_stage.on_stage_end(self.time)
+        # TODO: Configure blocking/non-blocking.
+        cur_time = self.time
+        for bidx, request in enumerate(self._batch.requests):
+            # Do not store all of them, store only those processed in this stage.
+            next_num_processed_tokens = request.num_processed_tokens + self._batch.num_tokens[bidx]
+            if next_num_processed_tokens <= request.num_prefill_tokens \
+                or next_num_processed_tokens % stage_scheduler.cache_engine.chunk_size == 0:
+                # skip_existing and blocking.
+                # TODO: Check why trans rate does not affect results when non-blocking store.
+                cur_time = stage_scheduler.cache_engine.store(cur_time, request.tokens[:next_num_processed_tokens], True, True)
+        self._time = cur_time
         metrics_store.on_batch_stage_end(
             self._batch_stage,
             self.time,

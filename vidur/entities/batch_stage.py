@@ -94,9 +94,12 @@ class BatchStage(BaseEntity):
         self,
         time: float,
     ) -> None:
+        # Can be blocked by decoding in GPU(other computation on GPU).
+        '''
         assert (
             time == self._scheduled_at + self._execution_time
         ), f"{time} != {self._scheduled_at} + {self._execution_time}"
+        '''
 
         self._completed_at = time
 

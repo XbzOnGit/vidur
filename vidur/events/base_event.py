@@ -14,6 +14,14 @@ class BaseEvent(ABC):
         self._id = BaseEvent.generate_id()
         self._event_type = event_type
         self._priority_number = self._get_priority_number()
+        self._simulator = None
+    
+    @property
+    def simulator(self):
+        return self._simulator
+    
+    def set_simulator(self, simulator):
+        self._simulator = simulator
 
     @classmethod
     def generate_id(cls):

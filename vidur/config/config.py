@@ -450,6 +450,63 @@ class ReplicaConfig:
         default="a100_pairwise_nvlink",
         metadata={"help": "Network device."},
     )
+    eviction_policy: str = field(
+        default="lru",
+        metadata={"help": "Eviction policy."},
+    )
+    ours_v1_token_thres: int = field(
+        default=5000,
+        metadata={"help": "Ours v1 token threshold."},
+    )
+    memory_size_per_pp: str = field(
+        default="",
+        metadata={"help": "CPU memory size per pipeline stage."},
+    )
+    disk_size_per_pp: str = field(
+        default="",
+        metadata={"help": "Disk size per pipeline stage."},
+    )
+    disk_cpu_thput: str = field(
+        default="",
+        metadata={"help": "Disk to cpu throughput."},
+    )
+    cpu_disk_thput: str = field(
+        default="",
+        metadata={"help": "Cpu to disk throughput."},
+    )
+    cpu_gpu_thput: str = field(
+        default="",
+        metadata={"help": "Cpu to gpu throughput."}
+    )
+    gpu_cpu_thput: str = field(
+        default="",
+        metadata={"help": "Gpu to cpu throughput."}
+    )
+    disk_gpu_thput: str = field(
+        default="",
+        metadata={"help": "Disk to gpu throughput."}
+    )
+    gpu_disk_thput: str = field(
+        default="",
+        metadata={"help": "Gpu to disk throughput."}
+    )
+    contention_model: str = field(
+        default="rw-no-contend",
+        metadata={"help": "How does transmission contend."}
+    )
+    gpu_prefix_cache: bool = field(
+        default=False,
+        metadata={"help": "Enable GPU prefix cache managed by serving engine."}
+    )
+    cache_chunk_size: int = field(
+        default=256,
+        metadata={"help": "Chunk size for cache engine"},
+    )
+    compression: str = field(
+        default="none",
+        metadata={"help": "Compression config."},
+    )
+
 
     def __post_init__(self):
         self.world_size = self.num_pipeline_stages * self.tensor_parallel_size
@@ -463,6 +520,60 @@ class ReplicaConfig:
             self.network_device
         )
 
+@dataclass
+class CacheEngineConfig:
+    eviction_policy: str = field(
+        default="lru",
+        metadata={"help": "Eviction policy."},
+    )
+    ours_v1_token_thres: int = field(
+        default=5000,
+        metadata={"help": "Ours v1 token threshold."},
+    )
+    cpu_memory_size: str = field(
+        default="",
+        metadata={"help": "CPU memory size."},
+    )
+    disk_size: str = field(
+        default="",
+        metadata={"help": "Disk size."},
+    )
+    disk_cpu_thput: str = field(
+        default="",
+        metadata={"help": "Disk to cpu throughput."},
+    )
+    cpu_disk_thput: str = field(
+        default="",
+        metadata={"help": "Cpu to disk throughput."},
+    )
+    cpu_gpu_thput: str = field(
+        default="",
+        metadata={"help": "Cpu to gpu throughput."}
+    )
+    gpu_cpu_thput: str = field(
+        default="",
+        metadata={"help": "Gpu to cpu throughput."}
+    )
+    disk_gpu_thput: str = field(
+        default="",
+        metadata={"help": "Disk to gpu throughput."}
+    )
+    gpu_disk_thput: str = field(
+        default="",
+        metadata={"help": "Gpu to disk throughput."}
+    )
+    contention_model: str = field(
+        default="rw-no-contend",
+        metadata={"help": "How does transmission contend."}
+    )
+    gpu_prefix_cache: bool = field(
+        default=False,
+        metadata={"help": "Enable GPU prefix cache managed by serving engine."}
+    )
+    cache_chunk_size: int = field(
+        default=256,
+        metadata={"help": "Chunk size for cache engine"},
+    )
 
 @dataclass
 class BaseGlobalSchedulerConfig(BasePolyConfig):
@@ -640,6 +751,10 @@ class SimulationConfig(ABC):
     cluster_config: ClusterConfig = field(
         default_factory=ClusterConfig,
         metadata={"help": "Cluster config."},
+    )
+    jsonl_trace_file: str = field(
+        default=None,
+        metadata={"help": "Path to the jsonl trace file."},
     )
     request_generator_config: BaseRequestGeneratorConfig = field(
         default_factory=SyntheticRequestGeneratorConfig,
