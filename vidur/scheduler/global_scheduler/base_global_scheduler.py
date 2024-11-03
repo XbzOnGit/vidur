@@ -10,7 +10,7 @@ from vidur.scheduler.replica_scheduler.replica_scheduler_registry import (
 
 
 class BaseGlobalScheduler(ABC):
-    def __init__(self, config: SimulationConfig, replicas: Dict[int, Replica]):
+    def __init__(self, config: SimulationConfig, replicas: Dict[int, Replica], simulator):
         self._config = config
         self._replicas = replicas
 
@@ -32,10 +32,15 @@ class BaseGlobalScheduler(ABC):
                 replica=replica,
                 num_stages=replica.num_pipeline_stages,
                 execution_time_predictor=execution_time_predictor,
+                simulator=simulator,
             )
             for replica_id, replica in replicas.items()
         }
         self._request_queue = []
+
+    @property
+    def acc_exec_time(self) -> dict:
+        return {replica_id: replica_scheduler.acc_exec_time for replica_id, replica_scheduler in self._replica_schedulers.items()}
 
     def sort_requests(self) -> None:
         self._request_queue.sort(key=lambda request: request._arrived_at)

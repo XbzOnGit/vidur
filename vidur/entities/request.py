@@ -31,6 +31,7 @@ class Request(BaseEntity):
         arrived_at: float,
         num_prefill_tokens: int,
         num_decode_tokens: int,
+        tokens: list,
         num_processed_tokens: int = 0,
     ):
         self._id = Request.generate_id()
@@ -38,6 +39,9 @@ class Request(BaseEntity):
         self._num_prefill_tokens = num_prefill_tokens
         self._num_decode_tokens = num_decode_tokens
         self._num_processed_tokens = num_processed_tokens
+        self._kv_cache_hit_length = 0
+        self._tokens = tokens
+        # print(f"Request {self._id} token number is {len(tokens)}")
 
         self._scheduled_at = 0
         self._execution_time = 0
@@ -56,17 +60,27 @@ class Request(BaseEntity):
         self._preempted = False
         self._completed = False
         self._is_prefill_complete = False
+        self._quality = None
 
         self._num_restarts = 0
 
     @property
     def size(self) -> Tuple[int, int]:
         return (self._num_prefill_tokens, self._num_decode_tokens)
+    
 
     @property
     @check_scheduled
     def scheduled_at(self) -> float:
         return self._scheduled_at
+
+    @property
+    def quality(self) -> float:
+        return self._quality
+    
+    def update_min_quality(self, quality: float):
+        if self._quality is None or quality < self._quality:
+            self._quality = quality
 
     @property
     @check_scheduled
@@ -198,6 +212,22 @@ class Request(BaseEntity):
     @property
     def has_started_decode(self) -> bool:
         return self._num_processed_tokens > self._num_prefill_tokens + 1
+    
+    @property
+    def kv_cache_hit_length(self) -> int:
+        return self._kv_cache_hit_length
+    
+    @property
+    def tokens(self) -> list:
+        return self._tokens
+    
+    # Only prefix now.
+    def set_num_processed_tokens(self, num_processed_tokens: int):
+        self._num_processed_tokens = num_processed_tokens
+
+    def set_kv_cache_hit_length(self, kv_cache_hit_length: int):
+        self._kv_cache_hit_length = kv_cache_hit_length
+
 
     def on_batch_schedule(
         self,
@@ -301,6 +331,7 @@ class Request(BaseEntity):
         self._num_decode_tokens = total_tokens - self._num_prefill_tokens
 
         self._num_processed_tokens = 0
+        self._kv_cache_hit_length = 0
         self._scheduled = False
         self._preempted = False
         self._completed = False

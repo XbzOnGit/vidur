@@ -1,10 +1,12 @@
 from typing import List
 
 from vidur.events import BaseEvent
+from vidur.events.compute_end_event import ComputeEndEvent
 from vidur.logger import init_logger
 from vidur.metrics import MetricsStore
 from vidur.scheduler import BaseGlobalScheduler
 from vidur.types import EventType
+
 
 logger = init_logger(__name__)
 
@@ -28,9 +30,9 @@ class ReplicaStageScheduleEvent(BaseEvent):
         stage_scheduler = scheduler._replica_schedulers[
             self._replica_id
         ]._replica_stage_schedulers[self._stage_id]
-
-        self._batch, self._batch_stage, execution_time = stage_scheduler.on_schedule()
-
+        # Retrieve happens here.
+        self._batch, self._batch_stage, execution_time, after_retrieve_time = stage_scheduler.on_schedule(self.time)
+        self._time = after_retrieve_time
         if not (self._batch and self._batch_stage):
             return []
 
@@ -45,9 +47,18 @@ class ReplicaStageScheduleEvent(BaseEvent):
 
         self._is_last_stage = stage_scheduler.is_last_stage
 
+        # Ocupy GPU device.
+        # And wait for it to be done.
+        # This is blocking.
+        launch_time, compute_time = stage_scheduler.gpu_compute_device.compute(self._batch_stage.execution_time, self.time)
+        compute_end_time = launch_time + compute_time
+        compute_end_event = ComputeEndEvent(compute_end_time, [], None)
+        global_simulator = self.simulator
+        global_simulator.add_events([compute_end_event])
+        block_time = global_simulator.loop_until(compute_end_event)
         return [
             BatchStageEndEvent(
-                self.time + self._batch_stage.execution_time,
+                block_time,
                 self._replica_id,
                 self._stage_id,
                 self._is_last_stage,

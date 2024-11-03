@@ -49,3 +49,14 @@ class MemoryPlanner:
 
     def get_max_request_slots(self) -> int:
         return self.get_max_batch_size() * self._replica.num_pipeline_stages
+
+    def get_memory_per_token_per_pipeline_stage(self) -> int:
+        assert self._replica.num_layers % self._replica.num_pipeline_stages == 0
+        return (
+            2 * # FP16
+            2 * # Key and Value
+            self._replica.attention_head_dim *
+            self._replica.kv_heads_per_tensor_parallel_worker * 
+            self._replica.num_tensor_parallel_workers * # Including all TP workers.
+            (self._replica.num_layers // self._replica.num_pipeline_stages)
+        )

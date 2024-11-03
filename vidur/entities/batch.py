@@ -35,6 +35,9 @@ class Batch(BaseEntity):
     ) -> None:
         self._id = Batch.generate_id()
         self._replica_id = replica_id
+        self._kv_cache_hit_length_restore = None
+        self._num_processed_tokens_restore = None
+        self._batch_num_tokens_restore = None
 
         self._requests = requests
         self._num_tokens = num_tokens
@@ -127,6 +130,58 @@ class Batch(BaseEntity):
 
         for request, num_tokens in zip(self._requests, self._num_tokens):
             request.on_batch_end(time, num_tokens)
+
+    def reset_on_request_and_num_tokens_change(self):
+        self._total_num_tokens = sum(self._num_tokens)
+        self._num_prefill_tokens = sum(
+            [
+                (t if not r.is_prefill_complete else 0)
+                for r, t in zip(self.requests, self._num_tokens)
+            ]
+        )
+        self._total_num_tokens_rounded = (self._total_num_tokens + 7) // 8 * 8
+
+
+    def restore_batch_kv(self, stage_no: int):
+        if stage_no == 0:
+            return
+        else:
+            for idx in range(len(self.requests)):
+                self.requests[idx].set_kv_cache_hit_length(self._kv_cache_hit_length_restore[idx])
+                self.requests[idx].set_num_processed_tokens(self._num_processed_tokens_restore[idx])
+                self.num_tokens[idx] = self._batch_num_tokens_restore[idx]
+            self.reset_on_request_and_num_tokens_change()
+
+    def modify_batch_kv(self, hit_lens: List[int]):
+        kv_cache_hit_length = []
+        num_processed_tokens_list = []
+        batch_num_tokens_list = []
+        for req_bidx, request in enumerate(self.requests):
+            kv_cache_hit_length.append(request.kv_cache_hit_length)
+            num_processed_tokens_list.append(request.num_processed_tokens)
+            batch_num_tokens_list.append(self.num_tokens[req_bidx])
+            if not request.is_prefill_complete:
+                hit_token_length = hit_lens[req_bidx]
+                # NOTE: Now only effective then care.
+                total_seq_len = request.num_processed_tokens + self.num_tokens[req_bidx]
+                assert hit_token_length <= total_seq_len, f"hit_token_length: {hit_token_length}, total_seq_len: {total_seq_len}"
+                if hit_token_length == total_seq_len:
+                    hit_token_length -= 1
+                if hit_token_length > request.num_processed_tokens:
+                    diff_len = hit_token_length - request.num_processed_tokens
+                    request.set_kv_cache_hit_length(hit_token_length)
+                    request.set_num_processed_tokens(hit_token_length)
+                    # Because will not do a full hit.
+                    assert hit_token_length < total_seq_len
+                    assert diff_len > 0
+                    self.num_tokens[req_bidx] -= diff_len
+        
+        self.reset_on_request_and_num_tokens_change()
+
+        self._kv_cache_hit_length_restore = kv_cache_hit_length
+        self._num_processed_tokens_restore = num_processed_tokens_list
+        self._batch_num_tokens_restore = batch_num_tokens_list
+
 
     @property
     def preempted_requests(self) -> List[Request]:
