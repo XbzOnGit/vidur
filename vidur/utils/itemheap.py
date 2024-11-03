@@ -1,10 +1,14 @@
 from typing import List
 # Min heap.
+item_idx = 0
 class ItemHeapWrapper:
     def __init__(self, item, score):
         self._item = item
         self._score = score
         self._index = None
+        global item_idx
+        self._id = item_idx
+        item_idx += 1
     @property
     def item(self):
         return self._item
@@ -18,35 +22,49 @@ class ItemHeapWrapper:
         self._index = index
     def set_score(self, score):
         self._score = score
+    def __lt__(self, other):
+        return self._score < other._score
+    def __le__(self, other):
+        return self._score <= other._score
+    def __eq__(self, other):
+        return self._score == other._score
+    def __ne__(self, other):
+        return self._score != other._score
+    def __gt__(self, other):
+        return self._score > other._score
+    def __ge__(self, other):
+        return self._score >= other._score
 
 class ItemHeap:
     def __init__(self):
         self._heap: List[ItemHeapWrapper] = []
-    def push_heap(self, item, score):
-        wrapped_item = ItemHeapWrapper(item, score)
-        self._heap.append(wrapped_item)
-        wrapped_item.set_index(len(self._heap) - 1)
+    def push_heap(self, item: ItemHeapWrapper):
+        self._heap.append(item)
+        item.set_index(len(self._heap) - 1)
         self._sift_up(len(self._heap) - 1)
     def pop_heap(self):
         if len(self._heap) == 0:
             return None
         self.swap(0, len(self._heap) - 1)
         item = self._heap.pop()
-        item.index = None
+        item.set_index(None)
         self._sift_down(0)
         return item.item
     def top(self):
         if len(self._heap) == 0:
             return None
         return self._heap[0].item
-    def remove(self, item):
+    def remove(self, item: ItemHeapWrapper):
         index = item.index
         self.swap(index, len(self._heap) - 1)
         self._heap.pop()
-        item.index = None
+        item.set_index(None)
         self._sift_down(index)
-    def update_on_keychange(self, item):
+    def update_on_keychange(self, item: ItemHeapWrapper):
         index = item.index
+        if index is None:
+            self.push_heap(item)
+            return
         parent = (index - 1) // 2
         if index > 0 and self._heap[parent].score > self._heap[index].score:
             self._sift_up(index)

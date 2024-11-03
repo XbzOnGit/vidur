@@ -22,7 +22,7 @@ class BaseEvictor(ABC):
     def evict(self):
         pass
     @abstractmethod
-    def update_on_transform(self, from_kv_obj, to_kv_obj):
+    def update_on_transform(self, from_kv_obj, to_kv_obj, timepoint: float):
         pass
     @abstractmethod
     def update_on_transfer(self, from_kv_obj, to_kv_obj):
@@ -45,7 +45,7 @@ class LRUEvictor(BaseEvictor):
         return EvictOpType.NONE, None
     def update_on_put(self, chunk_kv: list, timepoint: float):
         return self.update_on_get(chunk_kv, timepoint)
-    def update_on_transform(self, from_kv_obj, to_kv_obj):
+    def update_on_transform(self, from_kv_obj, to_kv_obj, timepoint: float):
         raise NotImplementedError("LRU does not transform.")
     def update_on_transfer(self, from_kv_obj, to_kv_obj):
         return self.update_on_get([to_kv_obj], 0.0)
@@ -74,11 +74,11 @@ class LFUEvictor(BaseEvictor):
         return EvictOpType.NONE, None
     def update_on_put(self, chunk_kv: list, timepoint: float):
         return self.update_on_get(chunk_kv, timepoint)
-    def update_on_transform(self, from_kv_obj, to_kv_obj):
+    def update_on_transform(self, from_kv_obj, to_kv_obj, timepoint: float):
         raise NotImplementedError("LFU does not transform.")
     def update_on_transfer(self, from_kv_obj, to_kv_obj):
         assert to_kv_obj.evictor_data is None
-        assert from_kv_obj.evictor_data is not None
+        assert from_kv_obj.evictor_data is not None, f"{from_kv_obj._id} evictor data is None."
         new_score = (from_kv_obj.evictor_data.score[0],
                      from_kv_obj.evictor_data.score[1], from_kv_obj.evictor_data.score[2])
         to_kv_obj.set_evictor_data(ItemHeapWrapper(to_kv_obj, new_score))
@@ -109,15 +109,13 @@ class OurEvictorV1(BaseEvictor):
         return EvictOpType.NONE, None
     
     def update_on_put(self, chunk_kv: List, timepoint: float):
-        return self.update_on_put(chunk_kv, timepoint)
+        return self.update_on_get(chunk_kv, timepoint)
 
     def update_on_transform(self, from_kv_obj, to_kv_obj, timepoint: float):
         # From kv obj must have been inside heap, so it must have evictor data.
         # To kv obj must be new, cos we do not compress it twice in this policy.
         assert from_kv_obj.evictor_data is not None
         assert to_kv_obj.evictor_data is None
-        assert from_kv_obj.compression_level == 0
-        assert to_kv_obj.compression_level == 1
         frequency = from_kv_obj.evictor_data.score[0]
         prefix_token_len = from_kv_obj.prefix_token_len
         new_score = (frequency, timepoint, -prefix_token_len)
