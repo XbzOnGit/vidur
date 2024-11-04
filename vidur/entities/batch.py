@@ -164,6 +164,8 @@ class Batch(BaseEntity):
                 hit_token_length = hit_lens[req_bidx]
                 # NOTE: Now only effective then care.
                 total_seq_len = request.num_processed_tokens + self.num_tokens[req_bidx]
+                # print(f"total_seq_len {total_seq_len} = {request.num_processed_tokens} + {self.num_tokens[req_bidx]}")
+                # print(f"hit_token_length {hit_token_length}")
                 assert hit_token_length <= total_seq_len, f"hit_token_length: {hit_token_length}, total_seq_len: {total_seq_len}"
                 if hit_token_length == total_seq_len:
                     hit_token_length -= 1
@@ -175,6 +177,7 @@ class Batch(BaseEntity):
                     assert hit_token_length < total_seq_len
                     assert diff_len > 0
                     self.num_tokens[req_bidx] -= diff_len
+                    # print(f"compute tokens from {self.num_tokens[req_bidx] + diff_len} to {self.num_tokens[req_bidx]}")
         
         self.reset_on_request_and_num_tokens_change()
 

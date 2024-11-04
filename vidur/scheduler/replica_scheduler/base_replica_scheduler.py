@@ -19,9 +19,13 @@ from vidur.entities.kvitem import get_compress_level_manager
 class KVSizeCalculator:
     def __init__(self, memory_planner):
         self._uncompressed_size_per_token_per_pipeline_stage = memory_planner.get_memory_per_token_per_pipeline_stage()
+        assert type(self._uncompressed_size_per_token_per_pipeline_stage) == int
+        print(f"uncompressed size per token per pipeline stage: {self._uncompressed_size_per_token_per_pipeline_stage}")
     def get_kv_size(self, token_number: int, compress_level: int) -> int:
         compress_level_manager = get_compress_level_manager()
         if compress_level == 0:
+            assert type(token_number) == int
+            assert type(self._uncompressed_size_per_token_per_pipeline_stage) == int
             return token_number * self._uncompressed_size_per_token_per_pipeline_stage
         else:
             return math.ceil(token_number * \
