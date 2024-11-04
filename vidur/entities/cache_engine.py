@@ -268,8 +268,12 @@ class CacheEngine(BaseEntity):
             evict_make_space = None
             have_in_next_layer = backend_no < 2 and self._storage_backends[backend_no + 1][0] is not None and \
             self._storage_backends[backend_no + 1][0].lookup(evicted_item.hash_value, None, None) is not None
+            have_next_layer = backend_no < 2 and self._storage_backends[backend_no + 1][0] is not None
             if evict_op == EvictOpType.WRITE_TO_LOWER and have_in_next_layer:
                 # Swap out once.
+                evict_op = EvictOpType.DROP
+            if evict_op == EvictOpType.WRITE_TO_LOWER and not have_next_layer:
+                # Have to drop.
                 evict_op = EvictOpType.DROP
             evict_op_return_time = cur_time
             # print(f"remove from backend_no: {backend_no}, evicted_item: {evicted_item._id}")
