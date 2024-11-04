@@ -46,6 +46,9 @@ class BatchStageEndEvent(BaseEvent):
         for bidx, request in enumerate(self._batch.requests):
             # Do not store all of them, store only those processed in this stage.
             next_num_processed_tokens = request.num_processed_tokens + self._batch.num_tokens[bidx]
+            if next_num_processed_tokens == request.num_prefill_tokens:
+                # prefill completes after this.
+                next_num_processed_tokens += 1
             if next_num_processed_tokens <= request.num_prefill_tokens \
                 or next_num_processed_tokens % stage_scheduler.cache_engine.chunk_size == 0:
                 # skip_existing and blocking.

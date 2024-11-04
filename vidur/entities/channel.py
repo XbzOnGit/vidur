@@ -16,6 +16,7 @@ class Channel(BaseEntity):
     # NOTE: Only model conguestion, pass throughput as parameter.
     # For modeling contention like disk and CPU fetch to GPU directly at the same time.
     def transmit(self, byte_number: int, launch_time: float, thput: float) -> Tuple[float, float]:
+        assert type(byte_number) == int
         if launch_time < self._last_time_in_use:
             launch_time = self._last_time_in_use
         transmit_time = byte_number / thput
