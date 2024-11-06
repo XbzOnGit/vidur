@@ -43,12 +43,16 @@ class LRUEvictor(BaseEvictor):
                 self._item_list.remove(kv)
             self._item_list.push_back(kv)
         return EvictOpType.NONE, None
+    
     def update_on_put(self, chunk_kv: list, timepoint: float):
         return self.update_on_get(chunk_kv, timepoint)
+    
     def update_on_transform(self, from_kv_obj, to_kv_obj, timepoint: float):
         raise NotImplementedError("LRU does not transform.")
+    
     def update_on_transfer(self, from_kv_obj, to_kv_obj):
         return self.update_on_get([to_kv_obj], 0.0)
+    
     def evict(self):
         return EvictOpType.WRITE_TO_LOWER, self._item_list.pop_front()
 

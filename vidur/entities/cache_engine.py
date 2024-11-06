@@ -259,6 +259,11 @@ class CacheEngine(BaseEntity):
                 assert self._storage_backends[backend_no][0].remove(evicted_item)
                 assert not have_in_next_layer
                 make_space_end = cur_time
+                
+                #IF we are already at the last layer, just remove this from the cache.
+                if backend_no == len(self._storage_backends) - 1:
+                    return make_space_end
+                
                 if evicted_item.size > self._storage_backends[backend_no + 1][1]:
                     make_space_end = self._make_space(cur_time, evicted_item.size, backend_no + 1)
                     evict_op_return_time = max(evict_op_return_time, make_space_end)

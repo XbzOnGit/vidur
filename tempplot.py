@@ -52,9 +52,9 @@ INFO 11-04 05:09:16 simulator.py:129] Metrics written
 INFO 11-04 05:09:16 simulator.py:137] Chrome event trace written
 '''
 x = ['no-cache', 'lru', 'lfu', 'oursv1']
-y1 = [6961.571086590569, 2447.6007269162587, 2447.5293160473757, 2149.6451782869835]
-y2 = [0.3565395933829464, 1.0050327426057213, 1.0050613059684717, 1.1471371127324874]
-y3 = [1.0, 1.0, 1.0, 0.9684189325277145]
+y1 = [6961.571086590569, 2975, 2626, 2161.682010005244]
+y2 = [0.3565395933829464, 0.724467, 0.8706188, 1.125]
+y3 = [1.0, 1.0, 1.0, 0.98420]
 # plot
 plt.figure(figsize=(10, 5))
 plt.subplot(1, 3, 1)
@@ -66,8 +66,7 @@ plt.title('average throughput(req/s)')
 plt.subplot(1, 3, 3)
 plt.bar(x, y3)
 plt.title('average quality')
-plt.show()
-
+plt.savefig("comparison.pdf", format='pdf')
 '''
 from matplotlib import pyplot as plt
 
