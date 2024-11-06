@@ -32,29 +32,33 @@ class BaseEvictor(ABC):
 class LRUEvictor(BaseEvictor):
     def __init__(self):
         super().__init__()
-        self._item_list = ItemList()
+        self._item_heap = ItemHeap()
     def update_on_get(self, chunk_kv: list, timepoint: float):
-        # Backwards.
-        for kv in reversed(chunk_kv):
+        for kv in chunk_kv:
+            prefix_token_len = kv.prefix_token_len
             if kv.evictor_data is None:
-                kv.set_evictor_data(ItemListWrapper(kv))
+                kv.set_evictor_data(ItemHeapWrapper(kv, (timepoint, -prefix_token_len)))
+                self._item_heap.push_heap(kv.evictor_data)
             kv = kv.evictor_data
-            if self._item_list.check_in_list(kv):
-                self._item_list.remove(kv)
-            self._item_list.push_back(kv)
+            kv.set_score((timepoint, -prefix_token_len))
+            self._item_heap.update_on_keychange(kv)
         return EvictOpType.NONE, None
     
     def update_on_put(self, chunk_kv: list, timepoint: float):
         return self.update_on_get(chunk_kv, timepoint)
     
     def update_on_transform(self, from_kv_obj, to_kv_obj, timepoint: float):
-        raise NotImplementedError("LRU does not transform.")
-    
+        raise NotImplementedError("LFU does not transform.")
     def update_on_transfer(self, from_kv_obj, to_kv_obj):
-        return self.update_on_get([to_kv_obj], 0.0)
-    
+        assert to_kv_obj.evictor_data is None
+        assert from_kv_obj.evictor_data is not None, f"{from_kv_obj._id} evictor data is None."
+        new_score = (from_kv_obj.evictor_data.score[0], from_kv_obj.evictor_data.score[1])
+        to_kv_obj.set_evictor_data(ItemHeapWrapper(to_kv_obj, new_score))
+        self._item_heap.push_heap(to_kv_obj.evictor_data)
+        return EvictOpType.NONE, None
+        
     def evict(self):
-        return EvictOpType.WRITE_TO_LOWER, self._item_list.pop_front()
+        return EvictOpType.WRITE_TO_LOWER, self._item_heap.pop_heap()
 
 
 class LFUEvictor(BaseEvictor):
