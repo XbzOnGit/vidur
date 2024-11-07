@@ -125,16 +125,16 @@ class Simulator:
     def _write_output(self) -> None:
         logger.info("Writing output")
 
-        self._metric_store.plot()
-        logger.info("Metrics written")
+        # self._metric_store.plot()
+        # logger.info("Metrics written")
 
-        if self._config.metrics_config.write_json_trace:
-            self._write_event_trace()
-            logger.info("Json event trace written")
+        # if self._config.metrics_config.write_json_trace:
+        #     self._write_event_trace()
+        #     logger.info("Json event trace written")
 
-        if self._config.metrics_config.enable_chrome_trace:
-            self._write_chrome_trace()
-            logger.info("Chrome event trace written")
+        # if self._config.metrics_config.enable_chrome_trace:
+        #     self._write_chrome_trace()
+        #     logger.info("Chrome event trace written")
 
     def _add_event(self, event: BaseEvent) -> None:
         heapq.heappush(self._event_queue, (event._priority_number, event))
