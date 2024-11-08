@@ -41,6 +41,7 @@ class BatchStageEndEvent(BaseEvent):
         )
         stage_scheduler.on_stage_end()
         self._batch_stage.on_stage_end(self.time)
+        # print(f"BatchStageEndEvent: {self._batch_stage.id} ends at {self.time}")
         # TODO: Configure blocking/non-blocking.
         cur_time = self.time
         for bidx, request in enumerate(self._batch.requests):
@@ -49,7 +50,8 @@ class BatchStageEndEvent(BaseEvent):
             if next_num_processed_tokens == request.num_prefill_tokens:
                 # prefill completes after this.
                 next_num_processed_tokens += 1
-            if next_num_processed_tokens <= request.num_prefill_tokens \
+            # print(f"next_num_processed_tokens: {next_num_processed_tokens}\nnum_prefill_tokens: {request.num_prefill_tokens}")
+            if next_num_processed_tokens <= request.num_prefill_tokens + 1 \
                 or next_num_processed_tokens % stage_scheduler.cache_engine.chunk_size == 0:
                 # skip_existing and blocking.
                 # TODO: Check why trans rate does not affect results when non-blocking store.

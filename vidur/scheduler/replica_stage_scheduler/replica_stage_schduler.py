@@ -87,9 +87,9 @@ class ReplicaStageScheduler:
             next_process_length = request.num_processed_tokens + batch.num_tokens[bidx]
             # print(f"request {request.id} with total length {len(request.tokens)}, after this batch, it will process {next_process_length}")
             if not request.is_prefill_complete:
-                # print(f"request {request.id} is not prefill complete, retrieve query len is {len(request.tokens)}")
                 seen_prompt_len = next_process_length
                 assert seen_prompt_len > 0, f"seen_prompt_len: {seen_prompt_len}"
+                # print(f"\nrequest {request.id} is not prefill complete, retrieve query len is {seen_prompt_len}")
                 hit_len, timepoint, quality = self._cache_engine.retrieve(cur_time, request.tokens[:seen_prompt_len], 0, True)
                 cur_time = timepoint
                 request.update_min_quality(quality)
@@ -104,7 +104,7 @@ class ReplicaStageScheduler:
     def on_schedule(self, cur_time: float) -> Tuple[Batch, BatchStage, ExecutionTime, float]:
         if self._is_busy or not self._batch_queue:
             return None, None, None, cur_time
-
+        # print(f"Replica {self._replica_id} Stage {self._stage_id} is scheduling batch {self._batch_queue[0].id}")
         self._is_busy = True
         batch = self._batch_queue.pop(0)
         self.pre_stage_process(batch)

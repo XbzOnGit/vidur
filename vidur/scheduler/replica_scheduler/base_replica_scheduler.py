@@ -92,7 +92,8 @@ class BaseReplicaScheduler(ABC):
                                                 replica_config.gpu_disk_thput,
                                                 replica_config.contention_model,
                                                 replica_config.gpu_prefix_cache,
-                                                replica_config.cache_chunk_size)
+                                                replica_config.cache_chunk_size,
+                                                replica_config.cache_log)
 
         self._replica_stage_schedulers = {
             stage_id: ReplicaStageScheduler(

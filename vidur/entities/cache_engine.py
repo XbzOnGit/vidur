@@ -21,6 +21,10 @@ Evictor will refer to evict_data.
 In some End Events, as callbacks.
 '''
 
+class CacheLogLevel:
+    DEFAULT = 0
+    V1 = 1
+
 
 # NOTE: Currently does not support token dropping like, because we decompress
 # before use. And for token dropping to enable larger batch size, scheduler needs 
@@ -97,6 +101,14 @@ class CacheEngine(BaseEntity):
     def __init__(self, cache_engine_config: CacheEngineConfig, replica_stage_scheduler) -> None:
         super().__init__()
         self._id = CacheEngine.generate_id()
+        self._cache_log = cache_engine_config.cache_log
+        self._cache_log_level = CacheLogLevel.DEFAULT
+        if self._cache_log.lower() == "default":
+            pass
+        elif self._cache_log.lower() == "v1":
+            self._cache_log_level = CacheLogLevel.V1
+        else:
+            raise ValueError(f"Cache log not recognized: {self._cache_log}")
         self._evict_policy = cache_engine_config.eviction_policy
         self._ours_v1_token_thres = cache_engine_config.ours_v1_token_thres
         self._cpu_memory_size = 0
@@ -472,9 +484,13 @@ class CacheEngine(BaseEntity):
         retrieved_chunks = []
         from_devices = []
         self._retrieve_chunk_cnt += len(chunk_tuple)
+        # print(f"retrieve called with {len(chunk_tuple)} chunks")
         # print(f"\n\ncpu size now: {self._storage_backends[1][1]}")
+        idx = 0
         for chunk in chunk_tuple:
+            idx += 1
             current_hash = self._hash_tokens(chunk, current_hash)
+            # print(f"Retrieve hash {current_hash}")
             found_chunk = False
             for storage_no, storage_pair in enumerate(self._storage_backends):
                 storage_backend = storage_pair[0]
@@ -482,6 +498,8 @@ class CacheEngine(BaseEntity):
                     continue
                 lookup_result = storage_backend.lookup(current_hash, None, StorageInfoType.READY)
                 if lookup_result is None:
+                    if self._cache_log_level > CacheLogLevel.DEFAULT:
+                        pass
                     continue
                 assert len(lookup_result) > 0
                 min_compression_level = None
@@ -515,6 +533,7 @@ class CacheEngine(BaseEntity):
                 min_quality = min(min_quality, the_quality)
                 break
             if not found_chunk:
+                # print(f"not found chunk {idx - 1}")
                 break
             else:
                 hit_token_cnt += len(chunk)
@@ -575,6 +594,7 @@ class CacheEngine(BaseEntity):
             prefix_hash = current_hash
             prefix_token_len = chunk_id * self._chunk_size
             current_hash = self._hash_tokens(chunk, prefix_hash)
+            # print(f"Store hash {current_hash}")
             self._debug_info[current_hash] = (tokens[0], chunk_id)
             skip = False
             if skip_existing:

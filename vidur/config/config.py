@@ -506,6 +506,10 @@ class ReplicaConfig:
         default="none",
         metadata={"help": "Compression config."},
     )
+    cache_log: str = field(
+        default="default",
+        metadata={"help": "Cache logging level."},
+    )
 
 
     def __post_init__(self):
@@ -573,6 +577,10 @@ class CacheEngineConfig:
     cache_chunk_size: int = field(
         default=256,
         metadata={"help": "Chunk size for cache engine"},
+    )
+    cache_log: str = field(
+        default="default",
+        metadata={"help": "Cache logging level."},
     )
 
 @dataclass
