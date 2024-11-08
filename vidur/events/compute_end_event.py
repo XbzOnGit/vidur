@@ -5,6 +5,7 @@ from vidur.metrics import MetricsStore
 from vidur.scheduler import BaseGlobalScheduler
 from vidur.types import EventType
 from vidur.entities.kvitem import KVObjectMetadata
+from vidur.types import StorageInfoType
 
 
 logger = init_logger(__name__)
@@ -28,7 +29,13 @@ class ComputeEndEvent(BaseEvent):
             return self._batch_stage_end_event.handle_event(scheduler, metrics_store)
         else:
             for kv_obj in self._transform_ready_list:
-                kv_obj.storage_info.mark_ready(kv_obj)
+                if kv_obj.storage_info is None:
+                    # Like in GPU, do not manage its memory.
+                    # Just mark ready.
+                    kv_obj.update_status(StorageInfoType.READY)
+                    kv_obj.update_associated_event(None)
+                else:
+                    kv_obj.storage_info.mark_ready(kv_obj)
             return []
                 
 

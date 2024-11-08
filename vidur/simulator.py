@@ -70,6 +70,7 @@ class Simulator:
         while self._event_queue and not self._terminate:
             _, event = heapq.heappop(self._event_queue)
             event.set_simulator(self)
+            # print(f"event: {event}")
             last_event = event
             self._set_time(event._time)
             new_events = event.handle_event(self._scheduler, self._metric_store)

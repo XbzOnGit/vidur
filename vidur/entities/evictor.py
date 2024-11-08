@@ -137,7 +137,7 @@ class OurEvictorV1(BaseEvictor):
         to_kv_obj.set_evictor_data(ItemHeapWrapper(to_kv_obj, new_score))
         self._heaps[to_kv_obj.compression_level].push_heap(to_kv_obj.evictor_data)
         return EvictOpType.NONE, None
-        
+
     def evict(self):
         if self._heaps[0].size() > 0:
             top_item = self._heaps[0].top()

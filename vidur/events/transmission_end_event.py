@@ -21,10 +21,12 @@ class TransmissionEndEvent(BaseEvent):
         self, scheduler: BaseGlobalScheduler, metrics_store: MetricsStore
     ) -> List[BaseEvent]:
         # TODO: Mark channel as free, if channel has that state.
+        # print(f"item_list length: {len(self._item_list)}")
         for kv_obj in self._item_list:
             assert isinstance(kv_obj, KVObjectMetadata)
             storage_info: StorageInfo = kv_obj.storage_info
             assert storage_info is not None, f"storage info is None on kv_obj {kv_obj._id}"
+            assert kv_obj.associated_event is not None
             assert kv_obj.associated_event == self
             assert storage_info.mark_ready(kv_obj)
         return []

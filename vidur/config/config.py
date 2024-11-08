@@ -510,6 +510,10 @@ class ReplicaConfig:
         default="default",
         metadata={"help": "Cache logging level."},
     )
+    store_policy: str = field(
+        default="no_compress",
+        metadata={"help": "Store policy."},
+    )
 
 
     def __post_init__(self):
@@ -581,6 +585,10 @@ class CacheEngineConfig:
     cache_log: str = field(
         default="default",
         metadata={"help": "Cache logging level."},
+    )
+    store_policy: str = field(
+        default="no_compress",
+        metadata={"help": "Store policy."},
     )
 
 @dataclass
