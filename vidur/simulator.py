@@ -11,6 +11,7 @@ from vidur.metrics import MetricsStore
 from vidur.request_generator import RequestGeneratorRegistry
 from vidur.scheduler import BaseGlobalScheduler, GlobalSchedulerRegistry
 from vidur.entities import Request
+import random
 
 logger = init_logger(__name__)
 
@@ -41,6 +42,7 @@ class Simulator:
         
         self._request_generator = None
         self._jsonl_trace_file = self._config.jsonl_trace_file
+        self._jsonl_trace_format = self._config.jsonl_trace_format
         self._time_scale_factor = self._config.time_scale_factor
         if len(self._jsonl_trace_file) == 0:
             self._request_generator = RequestGeneratorRegistry.get(
@@ -148,17 +150,43 @@ class Simulator:
         if len(self._jsonl_trace_file) > 0:
             requests = []
             with open(self._jsonl_trace_file, "r") as f:
-                for line in f:
-                    req_dict = json.loads(line)
-                    total_len = len(req_dict["tokens"])
-                    tokens = req_dict["tokens"]
-                    arrived_at = req_dict["arrived_at"] * self._time_scale_factor
-                    num_decode_tokens = req_dict["num_decode_tokens"]
-                    num_prefill_tokens = total_len - num_decode_tokens
-                    assert num_prefill_tokens > 0 and num_decode_tokens > 0
-                    request = Request(arrived_at, num_prefill_tokens, num_decode_tokens, tokens, 
-                                      0)
-                    requests.append(request)
+                if self._jsonl_trace_format.lower() == "full":
+                    for line in f:
+                        req_dict = json.loads(line)
+                        total_len = len(req_dict["tokens"])
+                        tokens = req_dict["tokens"]
+                        arrived_at = req_dict["arrived_at"] * self._time_scale_factor
+                        num_decode_tokens = req_dict["num_decode_tokens"]
+                        num_prefill_tokens = total_len - num_decode_tokens
+                        assert num_prefill_tokens > 0 and num_decode_tokens > 0
+                        request = Request(arrived_at, num_prefill_tokens, num_decode_tokens, tokens, 
+                                        0)
+                        requests.append(request)
+                elif self._jsonl_trace_format.lower() == "mooncake":
+                    for line in f:
+                        req_dict = json.loads(line)
+                        input_length = req_dict["input_length"]
+                        timestamp = (req_dict["timestamp"] / 1000) * self._time_scale_factor
+                        output_length = req_dict["output_length"]
+                        hash_ids = req_dict["hash_ids"]
+                        tokens = []
+                        current_len = 0
+                        blk_size = 512
+                        for hash_id in hash_ids:
+                            this_blk_size = blk_size
+                            if current_len + blk_size > input_length:
+                                this_blk_size = input_length - current_len
+                            tokens.extend([hash_id] * this_blk_size)
+                            current_len += this_blk_size
+                        assert current_len == input_length
+                        # random number.
+                        random_number = random.randint(0, 10000)
+                        tokens.extend([random_number] * output_length)
+                        request = Request(timestamp, input_length, output_length, tokens, 0)
+                        total_len = input_length + output_length
+                        if total_len > 16384:
+                            continue
+                        requests.append(request)
         else:
             requests = self._request_generator.generate()
         self._request_init_list = requests

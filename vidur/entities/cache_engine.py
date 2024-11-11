@@ -9,7 +9,7 @@ import struct
 import hashlib
 from vidur.entities.kvitem import KVStorageBackEnd, KVObjectMetadata, get_compress_level_manager
 from vidur.events.transmission_end_event import TransmissionEndEvent
-from vidur.entities.evictor import LFUEvictor, LRUEvictor, OurEvictorV1, BaseEvictor
+from vidur.entities.evictor import LFUEvictor, LRUEvictor, OurEvictorV1, BaseEvictor, LFUEvictorV2
 from vidur.entities.compute import ComputationDevice
 from vidur.events.compute_end_event import ComputeEndEvent
 import atexit
@@ -215,6 +215,8 @@ class CacheEngine(BaseEntity):
             return LRUEvictor()
         elif evictor_name.lower() == "lfu":
             return LFUEvictor()
+        elif evictor_name.lower() == "lfuv2":
+            return LFUEvictorV2()
         elif evictor_name.lower() == "oursv1":
             return OurEvictorV1(self._ours_v1_token_thres)
         else:
@@ -452,6 +454,8 @@ class CacheEngine(BaseEntity):
         evictor: Optional[BaseEvictor] = self._evictors[backend_no]
         if evictor is not None:
             evictor.update_on_transform(kv_obj, new_kv_obj, cur_time) # Copy eviction data like frequency.
+            # Note that _transform does not call update_on_put, becuase it is not a put access.
+            # update_on_transform should put the new object into evictor.
         transform_end_event.append_item(new_kv_obj)
         # Update index and space.
         if replace_original:
@@ -578,6 +582,8 @@ class CacheEngine(BaseEntity):
             # print(f"From {from_device.local_backend_no} to {to_device.local_backend_no}, time: {time_es}")
             # Do it in too device, do not decompress in CPU.
             if kv_obj.compression_level != 0:
+                # Note that this decompress happens in GPU and in the setting without GPU cache,
+                # it will not affect storage at all.
                 decompress_end_time, _ = self._transform(move_end_time, kv_obj.compression_level, 0, kv_obj, 
                                                     to_device.local_backend_no, True, blocking, False)
             else:

@@ -94,6 +94,52 @@ class LFUEvictor(BaseEvictor):
     def evict(self):
         return EvictOpType.WRITE_TO_LOWER, self._item_heap.pop_heap()
     
+class LFUEvictorV2(BaseEvictor):
+    def __init__(self):
+        super().__init__()
+        self._item_heap = ItemHeap()
+    def update_on_get(self, chunk_kv: list, timepoint: float):
+        # Frequency then recency, then prefix length.
+        # Min get popped first.
+        # (f, r, -prefix_token_len)
+        for kv in chunk_kv:
+            prefix_token_len = kv.prefix_token_len
+            # Note that evictor_data should not accessible from evictor data structure after poped.
+            # So gc will collect them after all of them kv item removed.
+            if kv.evictor_data is None:
+                kv.set_evictor_data(ItemHeapWrapper(kv, (0, timepoint, -prefix_token_len)))
+                self._item_heap.push_heap(kv.evictor_data)
+            kv = kv.evictor_data
+            kv.set_score((kv.score[0] + 1, timepoint, -prefix_token_len))
+            self._item_heap.update_on_keychange(kv)
+        return EvictOpType.NONE, None
+    def update_on_put(self, chunk_kv: list, timepoint: float):
+        return self.update_on_get(chunk_kv, timepoint)
+    def update_on_transform(self, from_kv_obj, to_kv_obj, timepoint: float):
+        assert from_kv_obj.evictor_data is not None
+        assert to_kv_obj.evictor_data is None
+        frequency = from_kv_obj.evictor_data.score[0]
+        prefix_token_len = from_kv_obj.prefix_token_len
+        new_score = (frequency, timepoint, -prefix_token_len)
+        to_kv_obj.set_evictor_data(ItemHeapWrapper(to_kv_obj, new_score))
+        self._item_heap.push_heap(to_kv_obj.evictor_data)
+        return EvictOpType.NONE, None
+    def update_on_transfer(self, from_kv_obj, to_kv_obj):
+        assert to_kv_obj.evictor_data is None
+        assert from_kv_obj.evictor_data is not None, f"{from_kv_obj._id} evictor data is None."
+        new_score = (from_kv_obj.evictor_data.score[0],
+                     from_kv_obj.evictor_data.score[1], from_kv_obj.evictor_data.score[2])
+        to_kv_obj.set_evictor_data(ItemHeapWrapper(to_kv_obj, new_score))
+        self._item_heap.push_heap(to_kv_obj.evictor_data)
+        return EvictOpType.NONE, None
+        
+    # This actually does a compress and evict if calling evict twice.
+    def evict(self):
+        kv_obj = self._item_heap.pop_heap()
+        if kv_obj.compression_level == 0:
+            return EvictOpType.COMPRESS, (kv_obj, 1)
+        else:
+            return EvictOpType.WRITE_TO_LOWER, kv_obj
 
 class OurEvictorV1(BaseEvictor):
     def __init__(self, threshold: int):

@@ -772,6 +772,10 @@ class SimulationConfig(ABC):
         default=None,
         metadata={"help": "Path to the jsonl trace file."},
     )
+    jsonl_trace_format: str = field(
+        default="full",
+        metadata={"help": "Jsonl trace format."},
+    )
     time_scale_factor: float = field(
         default=1.0,
         metadata={"help": "Time scale factor."},
