@@ -511,8 +511,16 @@ class ReplicaConfig:
         metadata={"help": "Cache logging level."},
     )
     store_policy: str = field(
-        default="no_compress",
+        default="fast_device",
         metadata={"help": "Store policy."},
+    )
+    full_chunk_only: bool = field(
+        default=True,
+        metadata={"help": "Only store full chunks."},
+    )
+    evictor_alpha: float = field(
+        default=0.5,
+        metadata={"help": "Alpha for evictor."},
     )
 
 
@@ -587,8 +595,16 @@ class CacheEngineConfig:
         metadata={"help": "Cache logging level."},
     )
     store_policy: str = field(
-        default="no_compress",
+        default="fast_device",
         metadata={"help": "Store policy."},
+    )
+    full_chunk_only: bool = field(
+        default=True,
+        metadata={"help": "Only store full chunks."},
+    )
+    evictor_alpha: float = field(
+        default=0.5,
+        metadata={"help": "Alpha for evictor."},
     )
 
 @dataclass

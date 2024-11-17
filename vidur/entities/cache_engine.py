@@ -7,9 +7,10 @@ from vidur.types import StorageDeviceType, StorageComputeType, StorageInfoType
 from vidur.types.evict_op_type import EvictOpType
 import struct
 import hashlib
-from vidur.entities.kvitem import KVStorageBackEnd, KVObjectMetadata, get_compress_level_manager
+from vidur.entities.kvitem import KVStorageBackEnd, KVObjectMetadata, get_compress_level_manager, KVObjectQuery
 from vidur.events.transmission_end_event import TransmissionEndEvent
-from vidur.entities.evictor import LFUEvictor, LRUEvictor, OurEvictorV1, BaseEvictor, LFUEvictorV2
+from vidur.entities.evictor import LFUEvictor, LRUEvictor, OurEvictorV1, BaseEvictor, LFUEvictorV2, \
+    OursGlobalFrameworkEvictor, FixedOursAlpha, WindowLFUEstimator
 from vidur.entities.compute import ComputationDevice
 from vidur.events.compute_end_event import ComputeEndEvent
 import atexit
@@ -25,11 +26,6 @@ class CacheLogLevel:
     DEFAULT = 0
     V1 = 1
 
-# No compress here only means no compress on store.
-# Can be compressed by evictor later.
-class StorePolicy:
-    NO_COMPRESS = 0
-    ALL_COMPRESS = 1
 
 # NOTE: Currently does not support token dropping like, because we decompress
 # before use. And for token dropping to enable larger batch size, scheduler needs 
@@ -57,6 +53,13 @@ class DeviceIndex:
             self.local_backend_no = 2
         else:
             raise ValueError(f"Unsupported device type: {device_type}")
+    def __hash__(self):
+        return hash((self.compute_type, self.replica_id, self.stage_id, self.device_type))
+    def __eq__(self, other):
+        return self.compute_type == other.compute_type and \
+                self.replica_id == other.replica_id and \
+                self.stage_id == other.stage_id and \
+                self.device_type == other.device_type
     
 
 class ChannelManager:
@@ -97,6 +100,49 @@ def build_local_channels_rw_no_contend(cache_engine_config: CacheEngineConfig, r
         global_channel_manager.add_channel(disk_device, gpu_device, parse_thput(cache_engine_config.disk_gpu_thput), gpu_read_channel)
         global_channel_manager.add_channel(gpu_device, disk_device, parse_thput(cache_engine_config.gpu_disk_thput), gpu_write_channel)
 
+def build_ours_framework_evictor(cache_engine_config: CacheEngineConfig, kv_size_calculator):
+    alpha = FixedOursAlpha(cache_engine_config.evictor_alpha)
+    thputs = []
+    storage_sizes = []
+    cpu_size = 0
+    if len(cache_engine_config.cpu_memory_size) > 0:
+        cpu_size = parse_size(cache_engine_config.cpu_memory_size)
+        cpu_thput = parse_thput(cache_engine_config.cpu_gpu_thput)
+        thputs.append(cpu_thput)
+        storage_sizes.append(cpu_size)
+    disk_size = 0
+    if len(cache_engine_config.disk_size) > 0:
+        disk_size = parse_size(cache_engine_config.disk_size)
+        disk_thput = parse_thput(cache_engine_config.disk_gpu_thput)
+        thputs.append(disk_thput)
+        storage_sizes.append(disk_size)
+    full_size = cpu_size + disk_size
+    assert full_size > 0
+    compression_manager = get_compress_level_manager()
+    min_ratio_level = None
+    min_ratio = None
+    for level, ratio in compression_manager.to_rate.items():
+        if min_ratio is None or ratio < min_ratio:
+            min_ratio = ratio
+            min_ratio_level = level
+    assert min_ratio_level is not None
+    chunk_size = cache_engine_config.cache_chunk_size
+    min_kv_chunk_size = kv_size_calculator.get_kv_size(chunk_size, min_ratio_level)
+    item_size_for_all_full_compress = full_size // min_kv_chunk_size
+    lfu_window_size = 3 * item_size_for_all_full_compress
+    # NOTE: Currently just 3 * C.
+    estimator = WindowLFUEstimator(lfu_window_size)
+    chunk_byte_size = kv_size_calculator.get_kv_size(chunk_size, 0)
+    # TODO: Optimize_on_hit.
+    global_ours_framework_evictor = OursGlobalFrameworkEvictor(alpha, estimator, 
+                                                               compression_manager,
+                                                               thputs,
+                                                               storage_sizes,
+                                                               False,
+                                                               cache_engine_config.store_policy,
+                                                               chunk_byte_size
+                                                               )
+    return global_ours_framework_evictor
 
 # Per (model x pipeline_stage).
 # So every batch_stage should have one.
@@ -115,13 +161,6 @@ class CacheEngine(BaseEntity):
         else:
             raise ValueError(f"Cache log not recognized: {self._cache_log}")
         self._store_policy_str = cache_engine_config.store_policy
-        self._store_policy = StorePolicy.NO_COMPRESS
-        if self._store_policy_str.lower() == "no_compress":
-            self._store_policy = StorePolicy.NO_COMPRESS
-        elif self._store_policy_str.lower() == "all_compress":
-            self._store_policy = StorePolicy.ALL_COMPRESS
-        else:
-            raise ValueError(f"Store policy not recognized: {self._store_policy_str}")
         self._evict_policy = cache_engine_config.eviction_policy
         self._ours_v1_token_thres = cache_engine_config.ours_v1_token_thres
         self._cpu_memory_size = 0
@@ -130,6 +169,7 @@ class CacheEngine(BaseEntity):
         self._disk_size = 0
         if len(cache_engine_config.disk_size) > 0:
             self._disk_size = parse_size(cache_engine_config.disk_size)
+        self._full_chunk_only = cache_engine_config.full_chunk_only
         self._replica_stage_scheduler = replica_stage_scheduler
         self._replica_id = replica_stage_scheduler.replica_id
         self._stage_id = replica_stage_scheduler.stage_id
@@ -182,15 +222,26 @@ class CacheEngine(BaseEntity):
         else:
             self._storage_backends: List[List[Optional[KVStorageBackEnd], Optional[int]]] = [[None, None]]
             self._evictors = [None]
+            global_ours_framework_evictor = None
             if len(cache_engine_config.cpu_memory_size) > 0:
                 self._storage_backends.append([KVStorageBackEnd(self), self._cpu_memory_size])
-                self._evictors.append(self._get_evictor_by_name(self._evict_policy))
+                if self._evict_policy.lower() == "oursframework":
+                    if global_ours_framework_evictor is None:
+                        global_ours_framework_evictor = build_ours_framework_evictor(cache_engine_config, self._kv_size_calculator)
+                    self._evictors.append(global_ours_framework_evictor)
+                else:
+                    self._evictors.append(self._get_evictor_by_name(self._evict_policy))
             else:
                 self._storage_backends.append([None, None])
                 self._evictors.append(None)
             if len(cache_engine_config.disk_size) > 0:
                 self._storage_backends.append([KVStorageBackEnd(self), self._disk_size])
-                self._evictors.append(self._get_evictor_by_name(self._evict_policy))
+                if self._evict_policy.lower() == "oursframework":
+                    if global_ours_framework_evictor is None:
+                        global_ours_framework_evictor = build_ours_framework_evictor(cache_engine_config, self._kv_size_calculator)
+                    self._evictors.append(global_ours_framework_evictor)
+                else:
+                    self._evictors.append(self._get_evictor_by_name(self._evict_policy))
             else:
                 self._storage_backends.append([None, None])
                 self._evictors.append(None)
@@ -232,6 +283,9 @@ class CacheEngine(BaseEntity):
             chunk_token = tokens[i:end_idx]
             chunk_tuple = tuple(chunk_token)
             retval.append(chunk_tuple)
+        if self._full_chunk_only:
+            if token_cnt % self._chunk_size != 0:
+                retval.pop()
         return tuple(retval)
 
     def _hash_tokens(
@@ -259,7 +313,7 @@ class CacheEngine(BaseEntity):
         assert self._storage_backends[backend_no][0] is not None
         while self._storage_backends[backend_no][1] < need_size:
             evictor: BaseEvictor = self._evictors[backend_no]
-            evict_op, evict_operand = evictor.evict()
+            evict_op, evict_operand = evictor.evict(backend_no)
             # Update index.
             evicted_item: Optional[KVObjectMetadata] = None
             assert evict_op != EvictOpType.NONE
@@ -332,6 +386,7 @@ class CacheEngine(BaseEntity):
                                                 evicted_item.size,
                                                 evicted_item.compression_level,
                                                 StorageInfoType.ARRIVING,
+                                                to_device,
                                                 trans_end_event)
                 # Mark on the next layer as arriving.
                 assert self._storage_backends[backend_no + 1][0].put(new_kv_obj)
@@ -401,6 +456,7 @@ class CacheEngine(BaseEntity):
                                           kv_obj.size,
                                           kv_obj.compression_level,
                                           StorageInfoType.ARRIVING,
+                                          to_device,
                                           trans_end_event
                                           )
             trans_end_event.append_item(new_kv_obj)
@@ -445,9 +501,20 @@ class CacheEngine(BaseEntity):
             transform_launch_time, transform_time = self._cpu_compute_device.compute(transform_time, cur_time)
         transform_end_time = transform_launch_time + transform_time
         transform_end_event = ComputeEndEvent(transform_end_time, [], None)
+        device_idx = None
+        if backend_no == 0:
+            device_idx = self._gpu_dev_index
+        elif backend_no == 1:
+            device_idx = self._cpu_dev_index
+        elif backend_no == 2:
+            device_idx = self._disk_dev_index
+        assert device_idx is not None
+        if temporary:
+            device_idx = None
         new_kv_obj = KVObjectMetadata(kv_obj.prefix_hash, kv_obj.hash_value, 
                                       kv_obj.prefix_token_len, kv_obj.chunk_token_len,
                                       int(kv_obj.size * ratio), to_compress_level, StorageInfoType.ARRIVING,
+                                      device_idx,
                                       transform_end_event
                                       )
         # print(f"id from {kv_obj._id} to {new_kv_obj._id}, transform from {from_compress_level} to {to_compress_level}, size: {kv_obj.size}, new size: {new_kv_obj.size}")
@@ -566,11 +633,15 @@ class CacheEngine(BaseEntity):
         assert len(gpu_kv_objs) == 0
         cpu_evictor: Optional[BaseEvictor] = self._evictors[1]
         disk_evictor: Optional[BaseEvictor] = self._evictors[2]
+        evictor_space_list = []
+        for level in range(1, len(self._evictors)):
+            if self._evictors[level] is not None:
+                evictor_space_list.append(self._storage_backends[level][1])
         # print(f"before evictor, cpu size now: {self._storage_backends[1][1]}")
         if cpu_evictor is not None:
-            cpu_evictor.update_on_get(cpu_kv_objs, current_time)
+            cpu_evictor.update_on_get(cpu_kv_objs, current_time, evictor_space_list)
         if disk_evictor is not None:
-            disk_evictor.update_on_get(disk_kv_objs, current_time)
+            disk_evictor.update_on_get(disk_kv_objs, current_time, evictor_space_list)
         max_time = current_time
         # print("\n\n")
         for chunk_id, kv_obj in enumerate(retrieved_chunks):
@@ -625,22 +696,32 @@ class CacheEngine(BaseEntity):
                         if lookup_result is not None:
                             skip = True
                             kv_obj_lookup_list = list(lookup_result)
+                            # TODO: Check here.
+                            # I think the necessary part should have been updated before in get.
+                            '''
                             if self._evictors[storage_id_no] is not None:
                                 evictor: BaseEvictor = self._evictors[storage_id_no]
                                 evictor.update_on_put(kv_obj_lookup_list, current_time)
+                            '''
             if skip:
                 # print("store one chunk skipped\n")
                 continue
             # NOTE: Store policy.
-            store_compress_level = 0 if self._store_policy == StorePolicy.NO_COMPRESS else 1
+            ori_kv_size = self._kv_size_calculator.get_kv_size(len(chunk), 0)
+            kv_query = KVObjectQuery(prefix_hash, current_hash, prefix_token_len, len(chunk), ori_kv_size)
+            # NOTE: Currently always call the hightest storage level.
+            store_compress_tuple = self._evictors[1].get_store_info([kv_query], current_time)[0]
+            store_to_no, store_compress_level = store_compress_tuple
             kv_size = None
             kv_obj = None
+            to_device = self._cpu_dev_index if store_to_no == 0 else self._disk_dev_index
             if store_compress_level != 0:
                 # TODO: The transform and make_space step are both blocking here.
                 # Make it non-blocking later.
                 ori_kv_size = self._kv_size_calculator.get_kv_size(len(chunk), 0)
                 ori_kv_obj = KVObjectMetadata(prefix_hash, current_hash, prefix_token_len, 
-                                              len(chunk), ori_kv_size, 0, StorageInfoType.READY, None)
+                                              len(chunk), ori_kv_size, 0, StorageInfoType.READY, to_device, 
+                                              None)
                 # NOTE: Not replacing original, and blocking now.
                 # temporary to make it not store to 0 device.
                 transform_end_time, new_obj = self._transform(current_time, 0, store_compress_level, ori_kv_obj, 
@@ -650,6 +731,7 @@ class CacheEngine(BaseEntity):
                 assert new_obj is not None
                 assert new_obj.status == StorageInfoType.READY, f"new_obj status: {new_obj.status}"
                 new_obj.update_status(StorageInfoType.ARRIVING)
+                new_obj.update_device_idx(to_device)
                 # Store new obj.
                 kv_size = new_obj.size
                 kv_obj = new_obj
@@ -657,13 +739,16 @@ class CacheEngine(BaseEntity):
                 kv_size = self._kv_size_calculator.get_kv_size(len(chunk), 0)
                 kv_obj = KVObjectMetadata(prefix_hash, current_hash, prefix_token_len,
                                           len(chunk), kv_size, 0, StorageInfoType.ARRIVING, 
+                                          to_device,
                                           None)
             assert kv_obj is not None
             assert kv_obj.status == StorageInfoType.ARRIVING
             assert kv_obj.size == kv_size
             total_need_size += kv_size
             assert type(kv_size) == int
-            to_device = self._cpu_dev_index if self._cpu_memory_size > 0 else self._disk_dev_index
+            # NOTE: evictor backend no 0 is 1 in cache engine backend.
+            if store_to_no == 0 and self._cpu_compute_device == 0:
+                to_device = self._disk_dev_index
             to_no = to_device.local_backend_no
             assert to_no != 0
             # TODO: Now this step is blocking. 

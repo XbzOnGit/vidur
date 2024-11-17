@@ -6,3 +6,4 @@ class EvictOpType(BaseIntEnum):
     WRITE_TO_LOWER = 1
     DROP = 2
     COMPRESS = 3
+    SWAP = 4

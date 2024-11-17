@@ -35,6 +35,18 @@ class CompressLevelManager:
         return token_number * self.encode_cost[compress_level]
     def get_compress_rate(self, compress_level: int) -> float:
         return self.to_rate[compress_level]
+    def get_all(self):
+        return_list = []
+        for level_no in self.to_rate.keys():
+            return_list.append((level_no, 
+                                self.to_rate[level_no], 
+                                self.to_quality[level_no], 
+                                self.encode_cost[level_no], 
+                                self.decode_cost[level_no]))
+        return return_list
+    def get_level_set(self) -> set:
+        return set(self.to_rate.keys())
+
 
 compress_level_manager = CompressLevelManager()
 
@@ -42,6 +54,30 @@ def get_compress_level_manager():
     return compress_level_manager
 
 
+class KVObjectQuery:
+    def __init__(self, prefix_hash: str, hash_value: str, 
+                 prefix_token_len: int,
+                 chunk_token_len: int, size: int):
+        self._prefix_hash = prefix_hash
+        self._hash_value = hash_value
+        self._prefix_token_len = prefix_token_len
+        self._chunk_token_len = chunk_token_len
+        self._size = size
+    @property
+    def prefix_token_len(self):
+        return self._prefix_token_len
+    @property
+    def prefix_hash(self):
+        return self._prefix_hash
+    @property
+    def hash_value(self):
+        return self._hash_value
+    @property
+    def chunk_token_len(self):
+        return self._chunk_token_len
+    @property
+    def size(self):
+        return self._size
 
 kv_obj_idx = 0
 class KVObjectMetadata:
@@ -49,6 +85,7 @@ class KVObjectMetadata:
                  prefix_token_len: int,
                  chunk_token_len: int, size: int, compression_level: int, 
                  status: StorageInfoType,
+                 device_idx,
                  associated_event):
         global kv_obj_idx
         self._id = kv_obj_idx
@@ -60,11 +97,15 @@ class KVObjectMetadata:
         self._size = size
         self._compression_level = compression_level
         self._status = status
+        self._device_idx = device_idx
         self._associated_event = associated_event
         self._evictor_data = None
         self._storage_info = None
         # if compression_level != 0:
         #     print(f"{self._id} is compressed to {compression_level}")
+    @property
+    def device_idx(self):
+        return self._device_idx
     @property
     def evictor_data(self):
         return self._evictor_data
@@ -103,6 +144,8 @@ class KVObjectMetadata:
         self._status = status
     def update_associated_event(self, event):
         self._associated_event = event
+    def update_device_idx(self, device_idx):
+        self._device_idx = device_idx
 
 
 

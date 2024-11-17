@@ -94,8 +94,9 @@ class BaseReplicaScheduler(ABC):
                                                 replica_config.gpu_prefix_cache,
                                                 replica_config.cache_chunk_size,
                                                 replica_config.cache_log,
-                                                replica_config.store_policy)
-
+                                                replica_config.store_policy,
+                                                replica_config.full_chunk_only,
+                                                replica_config.evictor_alpha)
         self._replica_stage_schedulers = {
             stage_id: ReplicaStageScheduler(
                 replica.id,
