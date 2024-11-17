@@ -166,9 +166,11 @@ class CacheEngine(BaseEntity):
         self._cpu_memory_size = 0
         if len(cache_engine_config.cpu_memory_size) > 0:
             self._cpu_memory_size = parse_size(cache_engine_config.cpu_memory_size)
+            print(f"cpu memory size: {self._cpu_memory_size}")
         self._disk_size = 0
         if len(cache_engine_config.disk_size) > 0:
             self._disk_size = parse_size(cache_engine_config.disk_size)
+            print(f"disk size: {self._disk_size}")
         self._full_chunk_only = cache_engine_config.full_chunk_only
         self._replica_stage_scheduler = replica_stage_scheduler
         self._replica_id = replica_stage_scheduler.replica_id
@@ -186,6 +188,7 @@ class CacheEngine(BaseEntity):
         self._gpu_compute_device: ComputationDevice = replica_stage_scheduler.gpu_compute_device
         self._cpu_compute_device: ComputationDevice = ComputationDevice()
         self._simulator = replica_stage_scheduler.simulator
+        self._effective_put_cnt = 0
         # TODO: GPU prefix cache not supported now.
         assert not self._gpu_prefix_cache
         # TODO: Only one rw-no-contend model.
@@ -245,7 +248,8 @@ class CacheEngine(BaseEntity):
             else:
                 self._storage_backends.append([None, None])
                 self._evictors.append(None)
-
+        sizes = [self._storage_backends[1][1], self._storage_backends[2][1]]
+        # print(f"cpu size: {sizes[0]}, disk size: {sizes[1]}")
         self._debug_info = {}
         atexit.register(self.print_stats)
 
@@ -254,6 +258,7 @@ class CacheEngine(BaseEntity):
         if self._hit_chunk_cnt > 0:
             print(f"hit in cpu rate: {self._hit_in_cpu_cnt / self._hit_chunk_cnt}")
             print(f"hit in disk rate: {self._hit_in_disk_cnt / self._hit_chunk_cnt}")
+        # print(f"effective put cnt: {self._effective_put_cnt}")
             
 
         
@@ -360,6 +365,7 @@ class CacheEngine(BaseEntity):
             # print(f"remove from backend_no: {backend_no}, evicted_item: {evicted_item._id}")
             if evict_op == EvictOpType.WRITE_TO_LOWER:
                 assert self._storage_backends[backend_no][0].remove(evicted_item)
+                # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + evicted_item.size}")
                 assert not have_in_next_layer
                 make_space_end = cur_time
                 if evicted_item.size > self._storage_backends[backend_no + 1][1]:
@@ -390,6 +396,7 @@ class CacheEngine(BaseEntity):
                                                 trans_end_event)
                 # Mark on the next layer as arriving.
                 assert self._storage_backends[backend_no + 1][0].put(new_kv_obj)
+                # print(f"put to {backend_no + 1}, size from {self._storage_backends[backend_no + 1][1]} to {self._storage_backends[backend_no + 1][1] - new_kv_obj.size}")
                 # print(f"WRITE_TO_LOWER EVICT new_kv_obj: {new_kv_obj._id}")
                 next_evictor: BaseEvictor = self._evictors[backend_no + 1]
                 next_evictor.update_on_transfer(evicted_item, new_kv_obj)
@@ -405,13 +412,13 @@ class CacheEngine(BaseEntity):
                 assert compression_level != 0
                 assert evicted_item.compression_level == 0
                 # print(f"evict compress before transform: {evicted_item.storage_info.copies}")
+                # print("Compress in backend_no: ", backend_no)
                 transform_end_time, new_obj = self._transform(cur_time, 0, compression_level, evicted_item, backend_no, 
                                                               True, True, False)
-                after_size = new_obj.size
                 evict_op_return_time = max(evict_op_return_time, transform_end_time)
-                evict_make_space = evicted_item.size - after_size
-                assert evict_make_space > 0
+                evict_make_space = 0 # NOTE: Transform itself HAS modified the space!!
             elif evict_op == EvictOpType.DROP:
+                # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + evicted_item.size}")
                 assert self._storage_backends[backend_no][0].remove(evicted_item)
                 evict_make_space = evicted_item.size
             else:
@@ -466,6 +473,7 @@ class CacheEngine(BaseEntity):
             assert self._storage_backends[to_no][0].put(new_kv_obj)
             # Update size.
             # Less free space.
+            # print(f"put to {to_no}, size from {self._storage_backends[to_no][1]} to {self._storage_backends[to_no][1] - new_kv_obj.size}")
             self._storage_backends[to_no][1] -= new_kv_obj.size
         global_simulator = self._simulator
         global_simulator.add_events([trans_end_event])
@@ -517,6 +525,9 @@ class CacheEngine(BaseEntity):
                                       device_idx,
                                       transform_end_event
                                       )
+        if to_compress_level != 0:
+            pass
+            # print(f"Transform to size: {new_kv_obj.size}")
         # print(f"id from {kv_obj._id} to {new_kv_obj._id}, transform from {from_compress_level} to {to_compress_level}, size: {kv_obj.size}, new size: {new_kv_obj.size}")
         evictor: Optional[BaseEvictor] = self._evictors[backend_no]
         if evictor is not None:
@@ -529,11 +540,15 @@ class CacheEngine(BaseEntity):
             if backend_no != 0:
                 assert self._storage_backends[backend_no][0] is not None
                 # print(f"{kv_obj.storage_info.copies}\n\n")
+                # print(f"Remove size: {kv_obj.size}")
+                # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + kv_obj.size}")
                 assert self._storage_backends[backend_no][0].remove(kv_obj)
                 self._storage_backends[backend_no][1] += kv_obj.size
         if backend_no != 0 and not temporary:
             assert self._storage_backends[backend_no][0] is not None
+            # print(f"Put size: {new_kv_obj.size}")
             assert self._storage_backends[backend_no][0].put(new_kv_obj)
+            # print(f"put to {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] - new_kv_obj.size}")
             self._storage_backends[backend_no][1] -= new_kv_obj.size
         global_simulator = self._simulator
         global_simulator.add_events([transform_end_event])
@@ -707,6 +722,7 @@ class CacheEngine(BaseEntity):
                 # print("store one chunk skipped\n")
                 continue
             # NOTE: Store policy.
+            self._effective_put_cnt += 1
             ori_kv_size = self._kv_size_calculator.get_kv_size(len(chunk), 0)
             kv_query = KVObjectQuery(prefix_hash, current_hash, prefix_token_len, len(chunk), ori_kv_size)
             # NOTE: Currently always call the hightest storage level.
@@ -768,6 +784,7 @@ class CacheEngine(BaseEntity):
                 evictor: BaseEvictor = self._evictors[to_no]
                 evictor.update_on_put([kv_obj], current_time)
             assert self._storage_backends[to_no][0].put(kv_obj)
+            # print(f"put to {to_no}, size from {self._storage_backends[to_no][1]} to {self._storage_backends[to_no][1] - kv_size}")
             # update space
             self._storage_backends[to_no][1] -= kv_size
             assert self._storage_backends[to_no][1] >= 0

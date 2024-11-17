@@ -254,15 +254,31 @@ class KVTokenIndexItem:
 # So key is just hash of content of tokens.
 
 # Per replica per stage PER STORAGE DEVICE.
+storage_backend_id = 0
 class KVStorageBackEnd:
     def __init__(self, cache_engine):
+        global storage_backend_id
+        self._id = storage_backend_id
+        storage_backend_id += 1
         self._hash_to_chunk: Dict[str, KVTokenIndexItem] = {}
         self._cache_engine = cache_engine
         self._kv_size_calculator = self._cache_engine.kv_size_calculator
+        self._total_cache_size = 0
+        self._put_called_cnt = 0
+        self._put_called_full_cnt = 0
+        self._put_called_compressed_cnt = 0
+        import atexit
+        atexit.register(self.print_stats)
     def put(self, kv_object_metadata: KVObjectMetadata) -> bool:
+        self._put_called_cnt += 1
+        if kv_object_metadata.compression_level != 0:
+            self._put_called_compressed_cnt += 1
+        else:
+            self._put_called_full_cnt += 1
         if kv_object_metadata.hash_value in self._hash_to_chunk:
             return self._hash_to_chunk[kv_object_metadata.hash_value].add_copy(kv_object_metadata)
         else:
+            self._total_cache_size += kv_object_metadata.size
             new_item = KVTokenIndexItem(kv_object_metadata.prefix_hash, kv_object_metadata.hash_value)
             new_item.add_copy(kv_object_metadata)
             self._hash_to_chunk[kv_object_metadata.hash_value] = new_item
@@ -298,5 +314,13 @@ class KVStorageBackEnd:
         return kv_object_metadata.size * compress_level_manager.decode_cost[kv_object_metadata.compression_level]
         
 
-
+    def print_stats(self):
+        '''
+        print(f"\nBackend {self._id}:")
+        print(f"Total cache size: {self._total_cache_size // (1024 ** 3)} GB")
+        print(f"Total put called: {self._put_called_cnt}")
+        print(f"Total put called full: {self._put_called_full_cnt}")
+        print(f"Total put called compressed: {self._put_called_compressed_cnt}")
+        '''
+        pass
         

@@ -298,7 +298,13 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
         self._store_compress_level = self.construct_store_compress_level(self._alpha.alpha(), self._compact_list)
         # Select the least predicted f from estimator.
         self._heaps = self.construct_heaps(len(thputs), compression_manager.get_level_set())
+        self._evict_called_cnt = 0
+        import atexit
+        atexit.register(self.print_stats)
 
+    def print_stats(self):
+        # print(f"Evict called {self._evict_called_cnt} times.")
+        pass
     def construct_store_compress_level(self, alpha: float, global_compact_list: list):
         store_compress_level = []
         for compact_list in global_compact_list:
@@ -418,6 +424,7 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
 
     # NOTE: The only state change to evictor is and should be heaps.
     def evict(self, local_backend_no: int):
+        self._evict_called_cnt += 1
         # It is a global evictor.
         assert local_backend_no > 0, f"Not supporting managing local backend {local_backend_no}"
         # print(f"Evicting from {local_backend_no}")
