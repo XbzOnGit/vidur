@@ -188,6 +188,9 @@ class CacheEngine(BaseEntity):
         self._gpu_compute_device: ComputationDevice = replica_stage_scheduler.gpu_compute_device
         self._cpu_compute_device: ComputationDevice = ComputationDevice()
         self._simulator = replica_stage_scheduler.simulator
+        self._wasted_write_to_lower = 0
+        self._wasted_compress = 0
+        self._wasted_drop = 0
         self._effective_put_cnt = 0
         # TODO: GPU prefix cache not supported now.
         assert not self._gpu_prefix_cache
@@ -259,6 +262,9 @@ class CacheEngine(BaseEntity):
             print(f"hit in cpu rate: {self._hit_in_cpu_cnt / self._hit_chunk_cnt}")
             print(f"hit in disk rate: {self._hit_in_disk_cnt / self._hit_chunk_cnt}")
         # print(f"effective put cnt: {self._effective_put_cnt}")
+        print(f"wasted item on write to lower: {self._wasted_write_to_lower}")
+        print(f"wasted item on compress: {self._wasted_compress}")
+        print(f"wasted item on drop: {self._wasted_drop}")
             
 
         
@@ -368,6 +374,8 @@ class CacheEngine(BaseEntity):
                 # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + evicted_item.size}")
                 assert not have_in_next_layer
                 make_space_end = cur_time
+                if evicted_item.hit_cnt == 0:
+                    self._wasted_write_to_lower += 1
                 if evicted_item.size > self._storage_backends[backend_no + 1][1]:
                     make_space_end = self._make_space(cur_time, evicted_item.size, backend_no + 1)
                     evict_op_return_time = max(evict_op_return_time, make_space_end)
@@ -413,12 +421,16 @@ class CacheEngine(BaseEntity):
                 assert compression_level > evicted_item.compression_level
                 # print(f"evict compress before transform: {evicted_item.storage_info.copies}")
                 # print("Compress in backend_no: ", backend_no)
+                if evicted_item.hit_cnt == 0:
+                    self._wasted_compress += 1
                 transform_end_time, new_obj = self._transform(cur_time, evicted_item.compression_level, 
                                                               compression_level, evicted_item, backend_no, 
                                                               True, True, False)
                 evict_op_return_time = max(evict_op_return_time, transform_end_time)
                 evict_make_space = 0 # NOTE: Transform itself HAS modified the space!!
             elif evict_op == EvictOpType.DROP:
+                if evicted_item.hit_cnt == 0:
+                    self._wasted_drop += 1
                 # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + evicted_item.size}")
                 assert self._storage_backends[backend_no][0].remove(evicted_item)
                 evict_make_space = evicted_item.size
@@ -613,6 +625,7 @@ class CacheEngine(BaseEntity):
                             min_compression_level = kv_obj_metadata.compression_level
                             selected_kv_obj = kv_obj_metadata
                 assert selected_kv_obj is not None
+                selected_kv_obj.inc_hit_cnt()
                 retrieved_chunks.append(selected_kv_obj)
                 if storage_no == 0:
                     gpu_kv_objs.append(selected_kv_obj)
@@ -724,8 +737,12 @@ class CacheEngine(BaseEntity):
             self._effective_put_cnt += 1
             ori_kv_size = self._kv_size_calculator.get_kv_size(len(chunk), 0)
             kv_query = KVObjectQuery(prefix_hash, current_hash, prefix_token_len, len(chunk), ori_kv_size)
+            evictor_space_list = []
+            for level in range(1, len(self._evictors)):
+                if self._evictors[level] is not None:
+                    evictor_space_list.append(self._storage_backends[level][1])
             # NOTE: Currently always call the hightest storage level.
-            store_compress_tuple = self._evictors[1].get_store_info([kv_query], current_time)[0]
+            store_compress_tuple = self._evictors[1].get_store_info([kv_query], current_time, evictor_space_list)[0]
             store_to_no, store_compress_level = store_compress_tuple
             kv_size = None
             kv_obj = None

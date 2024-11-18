@@ -100,7 +100,9 @@ class KVObjectMetadata:
         self._device_idx = device_idx
         self._associated_event = associated_event
         self._evictor_data = None
+        # TODO: Check where this is set.
         self._storage_info = None
+        self._hit_cnt = 0
         # if compression_level != 0:
         #     print(f"{self._id} is compressed to {compression_level}")
     @property
@@ -136,6 +138,9 @@ class KVObjectMetadata:
     @property
     def associated_event(self):
         return self._associated_event
+    @property
+    def hit_cnt(self):
+        return self._hit_cnt
     def set_evictor_data(self, evictor_data):
         self._evictor_data = evictor_data
     def set_storage_info(self, storage_info):
@@ -146,6 +151,8 @@ class KVObjectMetadata:
         self._associated_event = event
     def update_device_idx(self, device_idx):
         self._device_idx = device_idx
+    def inc_hit_cnt(self):
+        self._hit_cnt += 1
 
 
 

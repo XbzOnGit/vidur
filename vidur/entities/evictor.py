@@ -36,7 +36,7 @@ class BaseEvictor(ABC):
         pass
 
     @abstractmethod
-    def get_store_info(self, chunk_kv_query: list, timepoint: float) -> list:
+    def get_store_info(self, chunk_kv_query: list, timepoint: float, space_list = None) -> list:
         # Instruct cache engine to put into cache.
         pass
 
@@ -65,7 +65,7 @@ class LRUEvictor(BaseEvictor):
         to_kv_obj.set_evictor_data(ItemHeapWrapper(to_kv_obj, new_score))
         self._item_heap.push_heap(to_kv_obj.evictor_data)
         return EvictOpType.NONE, None
-    def get_store_info(self, chunk_kv_query: list, timepoint: float) -> list:
+    def get_store_info(self, chunk_kv_query: list, timepoint: float, space_list = None) -> list:
         return [(0, 0) for _ in range(len(chunk_kv_query))]
     def evict(self, local_backend_no: int):
         # local_backend_no not used here, since it is per device evictor.
@@ -103,7 +103,7 @@ class LFUEvictor(BaseEvictor):
         to_kv_obj.set_evictor_data(ItemHeapWrapper(to_kv_obj, new_score))
         self._item_heap.push_heap(to_kv_obj.evictor_data)
         return EvictOpType.NONE, None
-    def get_store_info(self, chunk_kv_query: list, timepoint: float) -> list:
+    def get_store_info(self, chunk_kv_query: list, timepoint: float, space_list = None) -> list:
         return [(0, 0) for _ in range(len(chunk_kv_query))]
     def evict(self, local_backend_no: int):
         return EvictOpType.WRITE_TO_LOWER, self._item_heap.pop_heap()
@@ -135,7 +135,7 @@ class LFUEvictorAllCompress(LFUEvictor):
     def __init__(self):
         super().__init__()
         self._item_heap = ItemHeap()
-    def get_store_info(self, chunk_kv_query: list, timepoint: float) -> list:
+    def get_store_info(self, chunk_kv_query: list, timepoint: float, space_list = None) -> list:
         # 0 layer, compress to 1.
         return [(0, 1) for _ in range(len(chunk_kv_query))]
 
@@ -181,7 +181,7 @@ class OurEvictorV1(BaseEvictor):
         to_kv_obj.set_evictor_data(ItemHeapWrapper(to_kv_obj, new_score))
         self._heaps[to_kv_obj.compression_level].push_heap(to_kv_obj.evictor_data)
         return EvictOpType.NONE, None
-    def get_store_info(self, chunk_kv_query: list, timepoint: float) -> list:
+    def get_store_info(self, chunk_kv_query: list, timepoint: float, space_list = None) -> list:
         return [(0, 0) for _ in range(len(chunk_kv_query))]
 
     def evict(self, local_backend_no: int):
@@ -304,7 +304,7 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
         atexit.register(self.print_stats)
 
         self._alpha_thresholds.sort()
-        print(f"alpha_thresholds: {self._alpha_thresholds}")
+        # print(f"alpha_thresholds: {self._alpha_thresholds}")
         self._recommended_alphas = []
         if len(self._alpha_thresholds) > 0:
             self._recommended_alphas.append(self._alpha_thresholds[0] / 2)
@@ -315,8 +315,8 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
         if len(self._alpha_thresholds) > 0:
             self._recommended_alphas.append(self._alpha_thresholds[-1] + 1.0)
         self._recommended_alphas = [str(rec_a) for rec_a in self._recommended_alphas]
-        print("recommended alphas:")
-        print(" ".join(self._recommended_alphas))
+        # print("recommended alphas:")
+        # print(" ".join(self._recommended_alphas))
 
     def print_stats(self):
         # print(f"Evict called {self._evict_called_cnt} times.")
@@ -458,6 +458,7 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
 
     # NOTE: The only state change to evictor is and should be heaps.
     # TODO: Check immediate increase score situations in store, prefer to do that.
+    # But now there should not be such an occasion at all.
     def evict(self, local_backend_no: int):
         self._evict_called_cnt += 1
         # It is a global evictor.
@@ -470,7 +471,6 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
             # If in the last layer, always prefer compress.
             # This is consistent with optimal_ops.
             max_compress_score = None
-            selected_from_compress_level = None
             selected_to_compress_level = None
             evict_item_compress_level = None
             level_cnt = 0
@@ -499,26 +499,29 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                                                     to_quality)
                     if max_compress_score is None or this_score > max_compress_score:
                         max_compress_score = this_score
-                        selected_from_compress_level = level_no
                         selected_to_compress_level = level_best_op
-            if selected_from_compress_level is None:
+                        evict_item_compress_level = level_no
+            if selected_to_compress_level is None:
                 assert evict_item_compress_level is not None, f"evict in last layer and no item to evict."
                 return EvictOpType.DROP, self._heaps[evictor_backend_no][evict_item_compress_level].pop_heap()
             else:
                 return EvictOpType.COMPRESS, \
-                (self._heaps[evictor_backend_no][selected_from_compress_level].pop_heap(), selected_to_compress_level)
+                (self._heaps[evictor_backend_no][evict_item_compress_level].pop_heap(), selected_to_compress_level)
 
         assert evictor_backend_no < len(self._thputs) - 1
         # print("Not in the last layer.")
-        current_max_score = None
+        min_score_drop = None
         current_evict_item_compress_level = None
-        selected_from_compress_level = None
         selected_to_compress_level = None
         for level_no, delay_fast, delay_slow, quality in compact_list:
             heap = self._heaps[evictor_backend_no][level_no]
             if heap.size() == 0:
                 continue
             level_best_op = self._optimal_ops[evictor_backend_no][level_no]
+            ori_score = self._item_utility(self._alpha.alpha(),
+                                           self._estimator.get(heap.top().hash_value),
+                                           delay_fast,
+                                           quality)
             # print(f"Level {level_no} best op {level_best_op} in {evictor_backend_no}")
             if level_best_op < 0:
                 assert level_best_op == -1
@@ -526,8 +529,10 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                                                 self._estimator.get(heap.top().hash_value),
                                                 delay_slow, 
                                                 quality)
-                if current_max_score is None or this_score > current_max_score:
-                    current_max_score = this_score
+                score_drop = ori_score - this_score
+                assert score_drop >= 0, f"score drop {score_drop} ori_score {ori_score} this_score {this_score}, for fixed alpha, should have drop > 0."
+                if min_score_drop is None or score_drop < min_score_drop:
+                    min_score_drop = score_drop
                     current_evict_item_compress_level = level_no
                     selected_to_compress_level = None
             else:
@@ -538,14 +543,16 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                                                 self._estimator.get(heap.top().hash_value),
                                                 to_delay_fast, 
                                                 to_quality)
-                if current_max_score is None or this_score > current_max_score:
-                    current_max_score = this_score
-                    current_evict_item_compress_level = None
-                    selected_from_compress_level = level_no
+                score_drop = ori_score - this_score
+                assert score_drop >= 0, f"score drop {score_drop} ori_score {ori_score} this_score {this_score}, for fixed alpha, should have drop > 0."
+                if min_score_drop is None or score_drop < min_score_drop:
+                    min_score_drop = score_drop
+                    current_evict_item_compress_level = level_no
                     selected_to_compress_level = level_best_op
+        assert current_evict_item_compress_level is not None
         if selected_to_compress_level is not None:
             return EvictOpType.COMPRESS, \
-            (self._heaps[evictor_backend_no][selected_from_compress_level].pop_heap(), selected_to_compress_level)
+            (self._heaps[evictor_backend_no][current_evict_item_compress_level].pop_heap(), selected_to_compress_level)
         else:
             assert current_evict_item_compress_level is not None
             return EvictOpType.WRITE_TO_LOWER, self._heaps[evictor_backend_no][current_evict_item_compress_level].pop_heap()
@@ -694,11 +701,27 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
         # We do not use timepoint here, the same.
         return self.update_on_transfer(from_kv_obj, to_kv_obj)
 
-    def get_store_info(self, chunk_kv_query: list, timepoint: float) -> list:
+    def get_store_info(self, chunk_kv_query: list, timepoint: float, space_list = None) -> list:
+        assert space_list is not None
         if self._store_policy == StorePolicy.FAST_DEVICE:
             # NOTE: Now always put to fast device, but not always full version.
             # Store to fast device for now.
             cl = self._store_compress_level[0]
+            # Check fast device for its space.
+            fast_space = space_list[0]
+            total_size = sum([kv.size for kv in chunk_kv_query])
+            if total_size > fast_space:
+                # print(f"Total size {total_size} > fast space {fast_space}")
+                the_level = cl
+                # Compress to before evict directly.
+                for level in range(cl, len(self._level_no_to_delay_and_quality[0])):
+                    if self._optimal_ops[0][level] < 0:
+                        the_level = level
+                        break
+                # print(f"Store to fast device, compress to {the_level} > {cl}")
+                return [(0, the_level) for _ in range(len(chunk_kv_query))]
+            else:
+                return [(0, cl) for _ in range(len(chunk_kv_query))]
             return [(0, cl) for _ in range(len(chunk_kv_query))]
         else:
             # TODO: Use a similar method with optimize_on_hit.
