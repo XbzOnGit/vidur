@@ -44,6 +44,10 @@ class CompressLevelManager:
                                 self.encode_cost[level_no], 
                                 self.decode_cost[level_no]))
         return return_list
+    def get_max_quality_drop(self) -> float:
+        max_q = max(self.to_quality.values())
+        min_q = min(self.to_quality.values())
+        return max_q - min_q
     def get_level_set(self) -> set:
         return set(self.to_rate.keys())
 

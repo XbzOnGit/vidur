@@ -400,6 +400,7 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
 
     def update_optimal_ops(self, alpha: float, global_compact_list: list):
         print(f"alpha in oursframework: {alpha}")
+        max_quality_drop = self._compression_manager.get_max_quality_drop()
         optimal_ops_list = []
         for evictor_backend_no, compact_list in enumerate(global_compact_list):
             optimal_ops = {}
@@ -416,6 +417,7 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                 assert level_no not in optimal_ops
                 max_compress_score = None
                 max_compress_level = None
+                max_compress_level_quality = None
                 for j in range(i + 1, len(compact_list)):
                     level_no_j, delay_fast_j, delay_slow_j, quality_j = compact_list[j]
                     if delay_slow is not None:
@@ -433,16 +435,23 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                     if max_compress_score is None:
                         max_compress_score = this_score
                         max_compress_level = level_no_j
+                        max_compress_level_quality = quality_j
                     else:
                         if this_score > max_compress_score:
                             max_compress_score = this_score
                             max_compress_level = level_no_j
+                            max_compress_level_quality = quality_j
                 if max_compress_level is not None:
                     if evict_score is not None:
                         if evict_score > max_compress_score:
                             optimal_ops[level_no] = -1
                         else:
-                            optimal_ops[level_no] = max_compress_level
+                            # Check again for how much quality is dropped by ratio.
+                            ratio_drop = (quality - max_compress_level_quality) / max_quality_drop
+                            if ratio_drop > 0.5:
+                                optimal_ops[level_no] = -1
+                            else: 
+                                optimal_ops[level_no] = max_compress_level
                     else:
                         assert delay_slow is None
                         optimal_ops[level_no] = max_compress_level
@@ -707,6 +716,7 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
             # NOTE: Now always put to fast device, but not always full version.
             # Store to fast device for now.
             cl = self._store_compress_level[0]
+            '''
             # Check fast device for its space.
             fast_space = space_list[0]
             total_size = sum([kv.size for kv in chunk_kv_query])
@@ -722,6 +732,7 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                 return [(0, the_level) for _ in range(len(chunk_kv_query))]
             else:
                 return [(0, cl) for _ in range(len(chunk_kv_query))]
+            '''
             return [(0, cl) for _ in range(len(chunk_kv_query))]
         else:
             # TODO: Use a similar method with optimize_on_hit.
