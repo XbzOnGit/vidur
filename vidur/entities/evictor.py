@@ -290,6 +290,7 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
         else:
             raise NotImplementedError(f"Not implemented store policy {store_policy}")
         # Ours operation include eviction && compress to higher.
+        self._alpha_thresholds = []
 
 
         self._compact_list = self.construct_compact_list(compression_manager, thputs, chunk_byte_size)
@@ -301,6 +302,21 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
         self._evict_called_cnt = 0
         import atexit
         atexit.register(self.print_stats)
+
+        self._alpha_thresholds.sort()
+        print(f"alpha_thresholds: {self._alpha_thresholds}")
+        self._recommended_alphas = []
+        if len(self._alpha_thresholds) > 0:
+            self._recommended_alphas.append(self._alpha_thresholds[0] / 2)
+        for i in range(1, len(self._alpha_thresholds) - 1):
+            alpha_val = self._alpha_thresholds[i]
+            next_alpha_val = self._alpha_thresholds[i + 1]
+            self._recommended_alphas.append((alpha_val + next_alpha_val)/2)
+        if len(self._alpha_thresholds) > 0:
+            self._recommended_alphas.append(self._alpha_thresholds[-1] + 1.0)
+        self._recommended_alphas = [str(rec_a) for rec_a in self._recommended_alphas]
+        print("recommended alphas:")
+        print(" ".join(self._recommended_alphas))
 
     def print_stats(self):
         # print(f"Evict called {self._evict_called_cnt} times.")
@@ -317,6 +333,17 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                     max_l = level_no
             store_compress_level.append(max_l)
         print(f"store_compress_level: {store_compress_level}")
+        for compact_list in global_compact_list:
+            for i  in range(0, len(compact_list)):
+                d1 = compact_list[i][1]
+                q1 = compact_list[i][3]
+                for j in range(i + 1, len(compact_list)):
+                    d2 = compact_list[j][1]
+                    q2 = compact_list[j][3]
+                    assert d1 > d2
+                    assert q1 > q2
+                    thres_alpha = (q1 - q2) / (d1 - d2)
+                    self._alpha_thresholds.append(thres_alpha)
         return store_compress_level
 
     def construct_level_no_to_delay_and_quality(self, global_compact_list: list):
@@ -367,8 +394,12 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
 
     def _item_utility_ratio(self, alpha: float, delay: float, quality: float):
         return -alpha * delay + quality
+    
+    def _item_utility(self, alpha: float, frequency, delay: float, quality: float):
+        return frequency * self._item_utility_ratio(alpha, delay, quality)
 
     def update_optimal_ops(self, alpha: float, global_compact_list: list):
+        print(f"alpha in oursframework: {alpha}")
         optimal_ops_list = []
         for evictor_backend_no, compact_list in enumerate(global_compact_list):
             optimal_ops = {}
@@ -379,10 +410,17 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                 assert delay_fast > 0.0
                 if delay_slow is None:
                     assert evictor_backend_no == len(global_compact_list) - 1
+                evict_score = None
+                if delay_slow is not None:
+                    evict_score = self._item_utility_ratio(alpha, delay_slow, quality)
+                assert level_no not in optimal_ops
                 max_compress_score = None
                 max_compress_level = None
                 for j in range(i + 1, len(compact_list)):
                     level_no_j, delay_fast_j, delay_slow_j, quality_j = compact_list[j]
+                    if delay_slow is not None:
+                        alpha_thres = (quality - quality_j) / (delay_slow - delay_fast_j)
+                    self._alpha_thresholds.append(alpha_thres)
                     # level_no should have been sorted.
                     assert level_no_j > level_no
                     assert delay_fast_j < delay_fast
@@ -399,10 +437,6 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                         if this_score > max_compress_score:
                             max_compress_score = this_score
                             max_compress_level = level_no_j
-                evict_score = None
-                if delay_slow is not None:
-                    evict_score = self._item_utility_ratio(alpha, delay_slow, quality)
-                assert level_no not in optimal_ops
                 if max_compress_level is not None:
                     if evict_score is not None:
                         if evict_score > max_compress_score:
@@ -423,6 +457,7 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
         return [{l_no: ItemHeap() for l_no in level_no_set} for _ in range(backend_num)]
 
     # NOTE: The only state change to evictor is and should be heaps.
+    # TODO: Check immediate increase score situations in store, prefer to do that.
     def evict(self, local_backend_no: int):
         self._evict_called_cnt += 1
         # It is a global evictor.
@@ -458,7 +493,10 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                     to_delay_fast, to_delay_slow, to_quality = \
                     self._level_no_to_delay_and_quality[evictor_backend_no][level_best_op]
                     assert to_delay_slow is None
-                    this_score = self._item_utility_ratio(self._alpha.alpha(), to_delay_fast, to_quality)
+                    this_score = self._item_utility(self._alpha.alpha(),
+                                                    self._estimator.get(heap.top().hash_value),
+                                                    to_delay_fast, 
+                                                    to_quality)
                     if max_compress_score is None or this_score > max_compress_score:
                         max_compress_score = this_score
                         selected_from_compress_level = level_no
@@ -484,7 +522,10 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
             # print(f"Level {level_no} best op {level_best_op} in {evictor_backend_no}")
             if level_best_op < 0:
                 assert level_best_op == -1
-                this_score = self._item_utility_ratio(self._alpha.alpha(), delay_slow, quality)
+                this_score = self._item_utility(self._alpha.alpha(),
+                                                self._estimator.get(heap.top().hash_value),
+                                                delay_slow, 
+                                                quality)
                 if current_max_score is None or this_score > current_max_score:
                     current_max_score = this_score
                     current_evict_item_compress_level = level_no
@@ -493,7 +534,10 @@ class OursGlobalFrameworkEvictor(BaseEvictor):
                 assert level_best_op > level_no
                 to_delay_fast, to_delay_slow, to_quality = \
                 self._level_no_to_delay_and_quality[evictor_backend_no][level_best_op]
-                this_score = self._item_utility_ratio(self._alpha.alpha(), to_delay_fast, to_quality)
+                this_score = self._item_utility(self._alpha.alpha(),
+                                                self._estimator.get(heap.top().hash_value),
+                                                to_delay_fast, 
+                                                to_quality)
                 if current_max_score is None or this_score > current_max_score:
                     current_max_score = this_score
                     current_evict_item_compress_level = None

@@ -410,10 +410,11 @@ class CacheEngine(BaseEntity):
             elif evict_op == EvictOpType.COMPRESS:
                 compression_level = evict_operand[1]
                 assert compression_level != 0
-                assert evicted_item.compression_level == 0
+                assert compression_level > evicted_item.compression_level
                 # print(f"evict compress before transform: {evicted_item.storage_info.copies}")
                 # print("Compress in backend_no: ", backend_no)
-                transform_end_time, new_obj = self._transform(cur_time, 0, compression_level, evicted_item, backend_no, 
+                transform_end_time, new_obj = self._transform(cur_time, evicted_item.compression_level, 
+                                                              compression_level, evicted_item, backend_no, 
                                                               True, True, False)
                 evict_op_return_time = max(evict_op_return_time, transform_end_time)
                 evict_make_space = 0 # NOTE: Transform itself HAS modified the space!!
@@ -486,8 +487,6 @@ class CacheEngine(BaseEntity):
                    backend_no: int,
                    replace_original: bool,
                    blocking: bool, temporary: bool) -> Tuple[float, KVObjectMetadata]:
-        # TODO: Do not decide by == 0 or not.
-        assert from_compress_level == 0 or to_compress_level == 0
         if from_compress_level == 0 and to_compress_level == 0:
             return cur_time, kv_obj.size
         assert blocking, "Now only support blocking transform."

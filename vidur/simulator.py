@@ -115,7 +115,7 @@ class Simulator:
         logger.info(f"Throughput: {thput} req/s")
         ttft_sum = sum([request.prefill_completed_at for request in self._request_init_list])
         avg_ttft = ttft_sum / init_req_cnt
-        logger.info(f"Average TTFT: {avg_ttft}s")
+        logger.info(f"Average TTFT: {avg_ttft} s")
         avg_quality = sum([request.quality for request in self._request_init_list]) / init_req_cnt
         logger.info(f"Average quality: {avg_quality}")
         avg_hit_len = sum([request.kv_cache_hit_length for request in self._request_init_list]) / init_req_cnt
