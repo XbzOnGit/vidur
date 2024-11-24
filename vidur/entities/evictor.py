@@ -787,7 +787,7 @@ class SuperChunk:
         self._quality = quality_should_be
         self._alpha = alpha
         self._estimator = estimator
-        self._best_op, self._best_drop_ratio = self._get_best_drop_ratio()
+        self._best_op, self._best_drop_ratio, self._best_space_drop = self._get_best_drop_ratio()
         self._the_wrapper = ItemSuperChunkWrapper(self)
     @property
     def wrapper(self):
@@ -821,6 +821,7 @@ class SuperChunk:
         evicted_u_ratio = None if evicted_delay is None else - self._alpha.alpha() * evicted_delay + self._quality
         best_drop = None if evicted_u_ratio is None else current_u_ratio - evicted_u_ratio
         best_compress_level = None
+        best_space_drop = None if evicted_u_ratio is None else 0.0
         best_is_evict = evicted_u_ratio is not None
         # Then compress levels.
         if self._compress_level < len(self._compression_levels) - 1:
@@ -830,7 +831,13 @@ class SuperChunk:
                 assert encode_cost >= 0.0
                 assert decode_cost >= 0.0
                 assert level_no > self._compress_level
-                compressed_total_size = self._total_size * ratio
+                ori_ratio = self._compression_levels[self._compress_level][0]
+                to_ratio = ratio / ori_ratio
+                assert to_ratio < 1.0
+                assert self._total_size % self._super_chunk_len == 0
+                unit_size = self._total_size // self._super_chunk_len
+                compressed_unit_size = int(unit_size * to_ratio)
+                compressed_total_size = compressed_unit_size * self._super_chunk_len
                 compressed_delay = compressed_total_size / self._thput
                 compressed_quality = quality
                 compressed_u_ratio = - self._alpha.alpha() * compressed_delay + compressed_quality
@@ -841,18 +848,20 @@ class SuperChunk:
                     best_drop = compressed_drop
                     best_compress_level = level_no
                     best_is_evict = False
+                    best_space_drop = to_ratio
         # The actual drop will be best_drop_ratio * freq.
         if not best_is_evict:
             if best_compress_level is None:
-                return tuple([EvictOpType.DROP]), best_drop
+                return tuple([EvictOpType.DROP]), best_drop, best_space_drop
             else:
-                return tuple([EvictOpType.COMPRESS, best_compress_level]), best_drop
+                return tuple([EvictOpType.COMPRESS, best_compress_level]), best_drop, best_space_drop
         else:
-            return tuple([EvictOpType.WRITE_TO_LOWER]), best_drop
+            return tuple([EvictOpType.WRITE_TO_LOWER]), best_drop, best_space_drop
         
     @property
     def score(self):
-        return self._best_drop_ratio * self.frequency
+        # decrease space more --> score should be lower, because lower score is better here.
+        return self._best_drop_ratio * self.frequency / (self._total_size * (1 - self._best_space_drop))
 
     def get_first_hash(self):
         assert len(self._content_hash_list) > 0
@@ -867,7 +876,7 @@ class SuperChunk:
         self._super_chunk_len = new_length
         self._total_size = new_size
         self._delay = self._total_size / self._thput
-        self._best_op, self._best_drop_ratio = self._get_best_drop_ratio()
+        self._best_op, self._best_drop_ratio, self._best_space_drop = self._get_best_drop_ratio()
 
     def reinit_on_compress(self, new_compress_level: int, new_total_size: int):
         assert new_compress_level != self._compress_level
@@ -876,7 +885,8 @@ class SuperChunk:
         self._delay = self._total_size / self._thput
         # items might have not be changed.
         self._quality = self._compression_levels[self._compress_level][1]
-        self._best_op, self._best_drop_ratio = self._get_best_drop_ratio()
+        self._best_op, self._best_drop_ratio, self._best_space_drop = self._get_best_drop_ratio()
+
 
     def reinit_on_write_to_lower_or_drop(self, next_thput):
         self._thput = self._evicted_thput
@@ -885,7 +895,7 @@ class SuperChunk:
             assert self._evicted_thput is None
             return
         self._delay = self._total_size / self._thput
-        self._best_op, self._best_drop_ratio = self._get_best_drop_ratio()
+        self._best_op, self._best_drop_ratio, self._best_space_drop = self._get_best_drop_ratio()
     
     def get_and_divide(self, differ_or_trunc_idx: int):
         # It is caused by a reuse in the middle.
