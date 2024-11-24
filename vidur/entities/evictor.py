@@ -835,7 +835,8 @@ class SuperChunk:
                 compressed_quality = quality
                 compressed_u_ratio = - self._alpha.alpha() * compressed_delay + compressed_quality
                 compressed_drop = current_u_ratio - compressed_u_ratio
-                if best_drop is None or compressed_drop > best_drop:
+                if best_drop is None or compressed_drop < best_drop:
+                    # NOTE: best_drop is min drop.
                     # For last layer, always prefer compress.
                     best_drop = compressed_drop
                     best_compress_level = level_no
@@ -1151,6 +1152,8 @@ class OursSuperChunkEvictor(BaseEvictor):
                 # print(f"Backward op: {self._last_cached_super_chunk.super_chunk_len} x {self._last_cached_super_chunk.compression_level} --> {best_level}\n")
         ret_list.append((store_to_layer, best_level))
         # print(f"get_store_info {ret_list}")
+        if best_level != 0:
+            print(f"Store to layer {store_to_layer} with {best_level} compression, with max_prev is {previous_max_level}")
         return ret_list
     
     def update_on_transfer(self, from_kv_obj, to_kv_obj):
@@ -1225,6 +1228,7 @@ class OursSuperChunkEvictor(BaseEvictor):
         op_aux = None
         if len(best_op) > 1:
             assert op_type == EvictOpType.COMPRESS
+            print(f"Eviction compress to {best_op[1]}")
             op_aux = best_op[1]
         ret_list = []
         # NOTE: reinit on compress and write_to_lower in advance here.
