@@ -10,7 +10,7 @@ import hashlib
 from vidur.entities.kvitem import KVStorageBackEnd, KVObjectMetadata, get_compress_level_manager, KVObjectQuery
 from vidur.events.transmission_end_event import TransmissionEndEvent
 from vidur.entities.evictor import LFUEvictor, LRUEvictor, OurEvictorV1, BaseEvictor, LFUEvictorV2, \
-    OursGlobalFrameworkEvictor, FixedOursAlpha, WindowLFUEstimator
+    OursGlobalFrameworkEvictor, FixedOursAlpha, WindowLFUEstimator, OursSuperChunkEvictor
 from vidur.entities.compute import ComputationDevice
 from vidur.events.compute_end_event import ComputeEndEvent
 import atexit
@@ -144,6 +144,50 @@ def build_ours_framework_evictor(cache_engine_config: CacheEngineConfig, kv_size
                                                                )
     return global_ours_framework_evictor
 
+def build_ours_super_chunk_evictor(cache_engine_config: CacheEngineConfig, kv_size_calculator):
+    alpha = FixedOursAlpha(cache_engine_config.evictor_alpha)
+    thputs = []
+    storage_sizes = []
+    cpu_size = 0
+    if len(cache_engine_config.cpu_memory_size) > 0:
+        cpu_size = parse_size(cache_engine_config.cpu_memory_size)
+        cpu_thput = parse_thput(cache_engine_config.cpu_gpu_thput)
+        thputs.append(cpu_thput)
+        storage_sizes.append(cpu_size)
+    disk_size = 0
+    if len(cache_engine_config.disk_size) > 0:
+        disk_size = parse_size(cache_engine_config.disk_size)
+        disk_thput = parse_thput(cache_engine_config.disk_gpu_thput)
+        thputs.append(disk_thput)
+        storage_sizes.append(disk_size)
+    full_size = cpu_size + disk_size
+    assert full_size > 0
+    compression_manager = get_compress_level_manager()
+    min_ratio_level = None
+    min_ratio = None
+    for level, ratio in compression_manager.to_rate.items():
+        if min_ratio is None or ratio < min_ratio:
+            min_ratio = ratio
+            min_ratio_level = level
+    assert min_ratio_level is not None
+    chunk_size = cache_engine_config.cache_chunk_size
+    min_kv_chunk_size = kv_size_calculator.get_kv_size(chunk_size, min_ratio_level)
+    item_size_for_all_full_compress = full_size // min_kv_chunk_size
+    lfu_window_size = 3 * item_size_for_all_full_compress
+    # NOTE: Currently just 3 * C.
+    estimator = WindowLFUEstimator(lfu_window_size)
+    chunk_byte_size = kv_size_calculator.get_kv_size(chunk_size, 0)
+    # TODO: Optimize_on_hit.
+    global_ours_super_chunk_evictor = OursSuperChunkEvictor(alpha, 
+                                                            estimator,
+                                                            compression_manager,
+                                                            thputs,
+                                                            storage_sizes,
+                                                            False,
+                                                            cache_engine_config.store_policy,
+                                                            chunk_byte_size)
+    return global_ours_super_chunk_evictor
+
 # Per (model x pipeline_stage).
 # So every batch_stage should have one.
 # For global stuff, like across models, across pipeline stages, prefetch.
@@ -229,12 +273,17 @@ class CacheEngine(BaseEntity):
             self._storage_backends: List[List[Optional[KVStorageBackEnd], Optional[int]]] = [[None, None]]
             self._evictors = [None]
             global_ours_framework_evictor = None
+            global_ours_super_chunk_evictor = None
             if len(cache_engine_config.cpu_memory_size) > 0:
                 self._storage_backends.append([KVStorageBackEnd(self), self._cpu_memory_size])
                 if self._evict_policy.lower() == "oursframework":
                     if global_ours_framework_evictor is None:
                         global_ours_framework_evictor = build_ours_framework_evictor(cache_engine_config, self._kv_size_calculator)
                     self._evictors.append(global_ours_framework_evictor)
+                elif self._evict_policy.lower() == "ourssuperchunk":
+                    if global_ours_super_chunk_evictor is None:
+                        global_ours_super_chunk_evictor = build_ours_super_chunk_evictor(cache_engine_config, self._kv_size_calculator)
+                    self._evictors.append(global_ours_super_chunk_evictor)
                 else:
                     self._evictors.append(self._get_evictor_by_name(self._evict_policy))
             else:
@@ -246,6 +295,10 @@ class CacheEngine(BaseEntity):
                     if global_ours_framework_evictor is None:
                         global_ours_framework_evictor = build_ours_framework_evictor(cache_engine_config, self._kv_size_calculator)
                     self._evictors.append(global_ours_framework_evictor)
+                elif self._evict_policy.lower() == "ourssuperchunk":
+                    if global_ours_super_chunk_evictor is None:
+                        global_ours_super_chunk_evictor = build_ours_super_chunk_evictor(cache_engine_config, self._kv_size_calculator)
+                    self._evictors.append(global_ours_super_chunk_evictor)
                 else:
                     self._evictors.append(self._get_evictor_by_name(self._evict_policy))
             else:
@@ -324,126 +377,125 @@ class CacheEngine(BaseEntity):
         assert self._storage_backends[backend_no][0] is not None
         while self._storage_backends[backend_no][1] < need_size:
             evictor: BaseEvictor = self._evictors[backend_no]
-            evict_op, evict_operand = evictor.evict(backend_no)
-            # Update index.
-            evicted_item: Optional[KVObjectMetadata] = None
-            assert evict_op != EvictOpType.NONE
-            if evict_op == EvictOpType.WRITE_TO_LOWER:
-                evicted_item = evict_operand
-                '''
-                if evicted_item is None:
-                    # print(f"Current size in backend_no: {backend_no} is {self._storage_backends[backend_no][1]}")
-                    # print(f"Available hashes: {len(self._storage_backends[backend_no][0]._hash_to_chunk)}")
-                    for kvindex in self._storage_backends[backend_no][0]._hash_to_chunk.values():
-                        kv_st = kvindex.storage_info
-                        compress = 0
-                        status_dict = kv_st.copies.get(compress, None)
-                        if status_dict is not None:
-                            if status_dict[StorageInfoType.READY] is not None:
-                                print(f"READY")
-                            elif status_dict[StorageInfoType.ARRIVING] is not None:
-                                print(f"ARRIVING")
-                            else:
-                                print(f"UNKNOWN")
-                '''
-                assert evicted_item is not None, "WRITE_TO_LOWER must have evicted item."
-            elif evict_op == EvictOpType.DROP:
-                evicted_item = evict_operand
-                assert evicted_item is not None, "DROP must have evicted item."
-            elif evict_op == EvictOpType.COMPRESS:
-                evicted_item = evict_operand[0]
-                # print(f"evict compress copies: {evicted_item.storage_info.copies}")
-                assert evicted_item is not None, "COMPRESS must have evicted item."
-            else:
-                raise ValueError(f"Unsupported evict op: {evict_op}")
-            assert evicted_item is not None
-            evict_make_space = None
-            have_in_next_layer = backend_no < 2 and self._storage_backends[backend_no + 1][0] is not None and \
-            self._storage_backends[backend_no + 1][0].lookup(evicted_item.hash_value, None, None) is not None
-            have_next_layer = backend_no < 2 and self._storage_backends[backend_no + 1][0] is not None
-            if evict_op == EvictOpType.WRITE_TO_LOWER and have_in_next_layer:
-                # Swap out once.
-                evict_op = EvictOpType.DROP
-            if evict_op == EvictOpType.WRITE_TO_LOWER and not have_next_layer:
-                # Have to drop.
-                evict_op = EvictOpType.DROP
-            evict_op_return_time = cur_time
-            # print(f"remove from backend_no: {backend_no}, evicted_item: {evicted_item._id}")
-            if evict_op == EvictOpType.WRITE_TO_LOWER:
-                assert self._storage_backends[backend_no][0].remove(evicted_item)
-                # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + evicted_item.size}")
-                assert not have_in_next_layer
-                make_space_end = cur_time
-                if evicted_item.hit_cnt == 0:
-                    self._wasted_write_to_lower += 1
-                if evicted_item.size > self._storage_backends[backend_no + 1][1]:
-                    make_space_end = self._make_space(cur_time, evicted_item.size, backend_no + 1)
-                    evict_op_return_time = max(evict_op_return_time, make_space_end)
-                from_device = None
-                to_device = None
-                if backend_no == 0:
-                    from_device = self._gpu_dev_index
-                    to_device = self._cpu_dev_index
-                elif backend_no == 1:
-                    from_device = self._cpu_dev_index
-                    to_device = self._disk_dev_index
+            # evict_op, evict_operand = evictor.evict(backend_no)
+            evict_list = evictor.evict(backend_no)
+            for evict_op, evict_operand in evict_list:
+                # Update index.
+                evicted_item: Optional[KVObjectMetadata] = None
+                assert evict_op != EvictOpType.NONE
+                if evict_op == EvictOpType.WRITE_TO_LOWER:
+                    # print(f"WRITE_TO_LOWER {evict_operand.hash_value}\n\n\n")
+                    evicted_item = evict_operand
+                    '''
+                    if evicted_item is None:
+                        # print(f"Current size in backend_no: {backend_no} is {self._storage_backends[backend_no][1]}")
+                        # print(f"Available hashes: {len(self._storage_backends[backend_no][0]._hash_to_chunk)}")
+                        for kvindex in self._storage_backends[backend_no][0]._hash_to_chunk.values():
+                            kv_st = kvindex.storage_info
+                            compress = 0
+                            status_dict = kv_st.copies.get(compress, None)
+                            if status_dict is not None:
+                                if status_dict[StorageInfoType.READY] is not None:
+                                    print(f"READY")
+                                elif status_dict[StorageInfoType.ARRIVING] is not None:
+                                    print(f"ARRIVING")
+                                else:
+                                    print(f"UNKNOWN")
+                    '''
+                    assert evicted_item is not None, "WRITE_TO_LOWER must have evicted item."
+                elif evict_op == EvictOpType.DROP:
+                    evicted_item = evict_operand
+                    assert evicted_item is not None, "DROP must have evicted item."
+                elif evict_op == EvictOpType.COMPRESS:
+                    evicted_item = evict_operand[0]
+                    # print(f"evict compress copies: {evicted_item.storage_info.copies}")
+                    assert evicted_item is not None, "COMPRESS must have evicted item."
                 else:
-                    raise ValueError(f"Unsupported backend_no: {backend_no} and {backend_no + 1}")
-                thput, channel = global_channel_manager.get_channel(from_device , to_device)
-                launch_time, trans_time = channel.transmit(evicted_item.size, make_space_end, thput)
-                trans_end_time = launch_time + trans_time
-                trans_end_event = TransmissionEndEvent(trans_end_time, [])
-                new_kv_obj = KVObjectMetadata(evicted_item.prefix_hash,
-                                                evicted_item.hash_value,
-                                                evicted_item.prefix_token_len,
-                                                evicted_item.chunk_token_len,
-                                                evicted_item.size,
-                                                evicted_item.compression_level,
-                                                StorageInfoType.ARRIVING,
-                                                to_device,
-                                                trans_end_event)
-                # Mark on the next layer as arriving.
-                assert self._storage_backends[backend_no + 1][0].put(new_kv_obj)
-                # print(f"put to {backend_no + 1}, size from {self._storage_backends[backend_no + 1][1]} to {self._storage_backends[backend_no + 1][1] - new_kv_obj.size}")
-                # print(f"WRITE_TO_LOWER EVICT new_kv_obj: {new_kv_obj._id}")
-                next_evictor: BaseEvictor = self._evictors[backend_no + 1]
-                next_evictor.update_on_transfer(evicted_item, new_kv_obj)
-                trans_end_event.append_item(new_kv_obj)
-                global_simulator = self._simulator
-                # Always blocking.
-                global_simulator.add_events([trans_end_event])
-                evict_op_return_time = global_simulator.loop_until(trans_end_event)
-                self._storage_backends[backend_no + 1][1] -= new_kv_obj.size
-                evict_make_space = evicted_item.size
-            elif evict_op == EvictOpType.COMPRESS:
-                compression_level = evict_operand[1]
-                assert compression_level != 0
-                assert compression_level > evicted_item.compression_level
-                # print(f"evict compress before transform: {evicted_item.storage_info.copies}")
-                # print("Compress in backend_no: ", backend_no)
-                if evicted_item.hit_cnt == 0:
-                    self._wasted_compress += 1
-                transform_end_time, new_obj = self._transform(cur_time, evicted_item.compression_level, 
-                                                              compression_level, evicted_item, backend_no, 
-                                                              True, True, False)
-                evict_op_return_time = max(evict_op_return_time, transform_end_time)
-                evict_make_space = 0 # NOTE: Transform itself HAS modified the space!!
-            elif evict_op == EvictOpType.DROP:
-                if evicted_item.hit_cnt == 0:
-                    self._wasted_drop += 1
-                # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + evicted_item.size}")
-                assert self._storage_backends[backend_no][0].remove(evicted_item)
-                evict_make_space = evicted_item.size
-            else:
-                raise ValueError(f"Unsupported evict op: {evict_op}")
-            assert type(evict_make_space) == int
-            # Drop then do nothing.
-            # Do evict op here.
-
-            # End evict op here.
-            evict_end_time = max(evict_end_time, evict_op_return_time)
-            # More free space.
-            self._storage_backends[backend_no][1] += evict_make_space
+                    raise ValueError(f"Unsupported evict op: {evict_op}")
+                assert evicted_item is not None
+                evict_make_space = None
+                have_in_next_layer = backend_no < 2 and self._storage_backends[backend_no + 1][0] is not None and \
+                self._storage_backends[backend_no + 1][0].lookup(evicted_item.hash_value, None, None) is not None
+                have_next_layer = backend_no < 2 and self._storage_backends[backend_no + 1][0] is not None
+                if evict_op == EvictOpType.WRITE_TO_LOWER and have_in_next_layer:
+                    # Swap out once.
+                    evict_op = EvictOpType.DROP
+                if evict_op == EvictOpType.WRITE_TO_LOWER and not have_next_layer:
+                    # Have to drop.
+                    evict_op = EvictOpType.DROP
+                evict_op_return_time = cur_time
+                # print(f"remove from backend_no: {backend_no}, evicted_item: {evicted_item._id}")
+                if evict_op == EvictOpType.WRITE_TO_LOWER:
+                    assert self._storage_backends[backend_no][0].remove(evicted_item)
+                    # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + evicted_item.size}")
+                    assert not have_in_next_layer
+                    make_space_end = cur_time
+                    if evicted_item.hit_cnt == 0:
+                        self._wasted_write_to_lower += 1
+                    if evicted_item.size > self._storage_backends[backend_no + 1][1]:
+                        make_space_end = self._make_space(cur_time, evicted_item.size, backend_no + 1)
+                        evict_op_return_time = max(evict_op_return_time, make_space_end)
+                    from_device = None
+                    to_device = None
+                    if backend_no == 0:
+                        from_device = self._gpu_dev_index
+                        to_device = self._cpu_dev_index
+                    elif backend_no == 1:
+                        from_device = self._cpu_dev_index
+                        to_device = self._disk_dev_index
+                    else:
+                        raise ValueError(f"Unsupported backend_no: {backend_no} and {backend_no + 1}")
+                    thput, channel = global_channel_manager.get_channel(from_device , to_device)
+                    launch_time, trans_time = channel.transmit(evicted_item.size, make_space_end, thput)
+                    trans_end_time = launch_time + trans_time
+                    trans_end_event = TransmissionEndEvent(trans_end_time, [])
+                    new_kv_obj = KVObjectMetadata(evicted_item.prefix_hash,
+                                                    evicted_item.hash_value,
+                                                    evicted_item.prefix_token_len,
+                                                    evicted_item.chunk_token_len,
+                                                    evicted_item.size,
+                                                    evicted_item.compression_level,
+                                                    StorageInfoType.ARRIVING,
+                                                    to_device,
+                                                    trans_end_event)
+                    # Mark on the next layer as arriving.
+                    assert self._storage_backends[backend_no + 1][0].put(new_kv_obj)
+                    # print(f"put to {backend_no + 1}, size from {self._storage_backends[backend_no + 1][1]} to {self._storage_backends[backend_no + 1][1] - new_kv_obj.size}")
+                    # print(f"WRITE_TO_LOWER EVICT new_kv_obj: {new_kv_obj._id}")
+                    next_evictor: BaseEvictor = self._evictors[backend_no + 1]
+                    next_evictor.update_on_transfer(evicted_item, new_kv_obj)
+                    trans_end_event.append_item(new_kv_obj)
+                    global_simulator = self._simulator
+                    # Always blocking.
+                    global_simulator.add_events([trans_end_event])
+                    evict_op_return_time = global_simulator.loop_until(trans_end_event)
+                    self._storage_backends[backend_no + 1][1] -= new_kv_obj.size
+                    evict_make_space = evicted_item.size
+                elif evict_op == EvictOpType.COMPRESS:
+                    compression_level = evict_operand[1]
+                    assert compression_level != 0
+                    assert compression_level > evicted_item.compression_level
+                    # print(f"evict compress before transform: {evicted_item.storage_info.copies}")
+                    # print("Compress in backend_no: ", backend_no)
+                    if evicted_item.hit_cnt == 0:
+                        self._wasted_compress += 1
+                    transform_end_time, new_obj = self._transform(cur_time, evicted_item.compression_level, 
+                                                                compression_level, evicted_item, backend_no, 
+                                                                True, True, False)
+                    evict_op_return_time = max(evict_op_return_time, transform_end_time)
+                    evict_make_space = 0 # NOTE: Transform itself HAS modified the space!!
+                elif evict_op == EvictOpType.DROP:
+                    if evicted_item.hit_cnt == 0:
+                        self._wasted_drop += 1
+                    # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + evicted_item.size}")
+                    assert self._storage_backends[backend_no][0].remove(evicted_item)
+                    evict_make_space = evicted_item.size
+                else:
+                    raise ValueError(f"Unsupported evict op: {evict_op}")
+                assert type(evict_make_space) == int
+                evict_end_time = max(evict_end_time, evict_op_return_time)
+                # More free space.
+                self._storage_backends[backend_no][1] += evict_make_space
         return evict_end_time
 
 
@@ -553,6 +605,7 @@ class CacheEngine(BaseEntity):
                 # print(f"{kv_obj.storage_info.copies}\n\n")
                 # print(f"Remove size: {kv_obj.size}")
                 # print(f"remove from {backend_no}, size from {self._storage_backends[backend_no][1]} to {self._storage_backends[backend_no][1] + kv_obj.size}")
+                # print(f"Removing {kv_obj.hash_value}")
                 assert self._storage_backends[backend_no][0].remove(kv_obj)
                 self._storage_backends[backend_no][1] += kv_obj.size
         if backend_no != 0 and not temporary:
@@ -666,8 +719,10 @@ class CacheEngine(BaseEntity):
                 evictor_space_list.append(self._storage_backends[level][1])
         # print(f"before evictor, cpu size now: {self._storage_backends[1][1]}")
         if cpu_evictor is not None:
+            # print(f"retrieve from cpu chunk cnt: {len(cpu_kv_objs)}")
             cpu_evictor.update_on_get(cpu_kv_objs, current_time, evictor_space_list)
         if disk_evictor is not None:
+            # print(f"retrieve from disk chunk cnt: {len(disk_kv_objs)}")
             disk_evictor.update_on_get(disk_kv_objs, current_time, evictor_space_list)
         max_time = current_time
         # print("\n\n")
@@ -696,7 +751,9 @@ class CacheEngine(BaseEntity):
               tokens: list,
               skip_existing: bool,
               blocking: bool) -> float:
-        
+        for evictor in self._evictors:
+            if evictor is not None:
+                evictor.begin_store()
         # print(f"store called at {current_time}")
         # print(f"store called with {len(tokens)} tokens")
         if self._cpu_memory_size == 0 and self._disk_size == 0:
@@ -705,14 +762,20 @@ class CacheEngine(BaseEntity):
         return_time = current_time
         # print(f"token number: {len(tokens)}")
         chunk_tuple = self._chunk_tokens(tokens)
+        # print(f"store chunks number: {len(chunk_tuple)}")
         # print(f"chunks number: {len(chunk_tuple)}")
         current_hash = ""
         total_need_size = 0
         # print(f"one req chunk number: {len(chunk_tuple)}")
+        max_previous_level = 0
+        following_token_number = sum([len(chunk) for chunk in chunk_tuple])
+        skippped_kv_objs = []
+        # print(f"\n\n\nstore called with {len(chunk_tuple)} chunks")
         for chunk_id, chunk in enumerate(chunk_tuple):
             prefix_hash = current_hash
             prefix_token_len = chunk_id * self._chunk_size
             current_hash = self._hash_tokens(chunk, prefix_hash)
+            # print(f"Store hash {current_hash}")
             # print(f"Store hash {current_hash}")
             self._debug_info[current_hash] = (tokens[0], chunk_id)
             skip = False
@@ -723,13 +786,20 @@ class CacheEngine(BaseEntity):
                         if lookup_result is not None:
                             skip = True
                             kv_obj_lookup_list = list(lookup_result)
+                            min_compress_obj = None
+                            min_compress_level_here = None
+                            for lookup_obj in kv_obj_lookup_list:
+                                if min_compress_level_here is None or lookup_obj.compression_level < min_compress_level_here:
+                                    min_compress_level_here = lookup_obj.compression_level
+                                    min_compress_obj = lookup_obj
+                            if min_compress_level_here > max_previous_level:
+                                max_previous_level = min_compress_level_here
+                            skippped_kv_objs.append(min_compress_obj)
                             # TODO: Check here.
                             # I think the necessary part should have been updated before in get.
-                            '''
                             if self._evictors[storage_id_no] is not None:
                                 evictor: BaseEvictor = self._evictors[storage_id_no]
-                                evictor.update_on_put(kv_obj_lookup_list, current_time)
-                            '''
+                                evictor.update_on_skipped_store([min_compress_obj], current_time)
             if skip:
                 # print("store one chunk skipped\n")
                 continue
@@ -742,7 +812,29 @@ class CacheEngine(BaseEntity):
                 if self._evictors[level] is not None:
                     evictor_space_list.append(self._storage_backends[level][1])
             # NOTE: Currently always call the hightest storage level.
-            store_compress_tuple = self._evictors[1].get_store_info([kv_query], current_time, evictor_space_list)[0]
+            following_size = self._kv_size_calculator.get_kv_size(following_token_number, 0)
+            # print(f"Asking about the {chunk_id} chunk")
+            store_info = self._evictors[1].get_store_info([kv_query], current_time, max_previous_level, following_size)
+            if len(store_info) > 1:
+                # NOTE: For now, only called one time in one store.
+                # Should apply these operations to previously cached items.
+                assert len(store_info) == 2
+                compress_chunk_cnt, compress_level = store_info[0]
+                if compress_level > max_previous_level:
+                    max_previous_level = compress_level
+                reduced_start = len(skippped_kv_objs) - compress_chunk_cnt
+                assert reduced_start >= 0
+                compress_kv_chunks = skippped_kv_objs[reduced_start:]
+                for compress_item in compress_kv_chunks:
+                    com_backend_no = compress_item.device_idx.local_backend_no
+                    assert compress_level > compress_item.compression_level
+                    prev_transform_end_time, prev_new_obj = self._transform(current_time, compress_item.compression_level, 
+                                                                compress_level, compress_item, com_backend_no, 
+                                                                True, True, False)
+                    # No need to set arriving, no transmit at all.
+                    return_time = max(return_time, prev_transform_end_time)
+                
+            store_compress_tuple = store_info[-1]
             store_to_no, store_compress_level = store_compress_tuple
             kv_size = None
             kv_obj = None
@@ -813,6 +905,7 @@ class CacheEngine(BaseEntity):
                 return_time = global_simulator.loop_until(trans_end_event)
                 store_one_chunk_host_end_time = return_time
             return_time = max(return_time, store_one_chunk_host_end_time)
+            following_token_number -= len(chunk)
         # print(f"put {total_need_size}")
         # print(f"cpu size from {oringal_cpu_size} to {self._storage_backends[1][1]}\n\n")
         return return_time

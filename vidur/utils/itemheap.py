@@ -38,17 +38,25 @@ class ItemHeapWrapper:
 class ItemHeap:
     def __init__(self):
         self._heap: List[ItemHeapWrapper] = []
+        self._check_set = set()
     def push_heap(self, item: ItemHeapWrapper):
+        # print("Pushing item ", item.item)
+        assert item.item not in self._check_set
+        self._check_set.add(item.item)
         self._heap.append(item)
         item.set_index(len(self._heap) - 1)
         self._sift_up(len(self._heap) - 1)
-    def pop_heap(self):
+        assert item.index is not None
+    def pop_heap(self, original_form=False):
         if len(self._heap) == 0:
             return None
+        self._check_set.remove(self._heap[0].item)
         self.swap(0, len(self._heap) - 1)
         item = self._heap.pop()
         item.set_index(None)
         self._sift_down(0)
+        if original_form:
+            return item
         return item.item
     def top(self):
         if len(self._heap) == 0:
