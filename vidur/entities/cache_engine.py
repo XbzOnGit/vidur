@@ -31,6 +31,8 @@ class CacheLogLevel:
 # before use. And for token dropping to enable larger batch size, scheduler needs 
 # to be changed, and do not decompress it.
 
+# TODO: Didn't consider a compressed KV cache(like token dropping) can enable larger batch size 
+# even in prefill.
 
 '''
 swap once:
@@ -848,6 +850,8 @@ class CacheEngine(BaseEntity):
                                               None)
                 # NOTE: Not replacing original, and blocking now.
                 # temporary to make it not store to 0 device.
+                # NOTE: For store, now assuming always from 0 to others.
+                # Now doesn't matter because encode and decode costs zero time.
                 transform_end_time, new_obj = self._transform(current_time, 0, store_compress_level, ori_kv_obj, 
                                                         0, False, True, True)
                 assert transform_end_time >= current_time

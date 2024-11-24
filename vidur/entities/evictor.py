@@ -973,6 +973,8 @@ class OursSuperChunkEvictor(BaseEvictor):
         self._from_hash_to_kv_obj = [] # Update on new hash or replace of obj.
         self._pending_operation_counter = 0
         self._is_first_op_on_evict = True
+        self._is_first_op_on_back = True
+        self._pending_backward_op = 0
         for _ in range(len(thputs)):
             self._from_hash_to_kv_obj.append({})
     def update_on_get(self, chunk_kv: list, timepoint: float, space_list=None):
@@ -1149,7 +1151,21 @@ class OursSuperChunkEvictor(BaseEvictor):
             store_to_layer = self._last_super_chunk_evictor_backend_no
             if best_level > self._last_cached_super_chunk.compression_level:
                 ret_list.append((self._last_cached_super_chunk.super_chunk_len, best_level))
+                # Adding these pending operations, which will be done backward by store.
+                self._pending_operation_counter += self._last_cached_super_chunk.super_chunk_len
+                assert self._pending_backward_op == 0
+                self._pending_backward_op = self._last_cached_super_chunk.super_chunk_len
+                self._is_first_op_on_back = True
+                # Because backward op is always done immediately after known.
                 # print(f"Backward op: {self._last_cached_super_chunk.super_chunk_len} x {self._last_cached_super_chunk.compression_level} --> {best_level}\n")
+                assert self._last_cached_super_chunk.total_size % self._last_cached_super_chunk.super_chunk_len == 0
+                unit_size = self._last_cached_super_chunk.total_size // self._last_cached_super_chunk.super_chunk_len
+                ratio = self._compression_manager.multiply_rate_from_to(self._last_cached_super_chunk.compression_level, 
+                                                                        best_level)
+                assert ratio < 1.0
+                unit_compressed_size = int(unit_size * ratio)
+                new_total_size = unit_compressed_size * self._last_cached_super_chunk.super_chunk_len
+                self._last_cached_super_chunk.reinit_on_compress(best_level, new_total_size)
         ret_list.append((store_to_layer, best_level))
         # print(f"get_store_info {ret_list}")
         if best_level != 0:
@@ -1178,6 +1194,7 @@ class OursSuperChunkEvictor(BaseEvictor):
         # print(f"update_on_transfer filling in [{evictor_backend_no}][{to_kv_obj.hash_value}]")
         self._from_hash_to_kv_obj[evictor_backend_no][to_kv_obj.hash_value] = to_kv_obj
         self._pending_operation_counter -= 1
+        # print(f"pending operation on transfer: from {self._pending_operation_counter + 1} to {self._pending_operation_counter}")
         return EvictOpType.NONE, None
     def update_on_transform(self, from_kv_obj, to_kv_obj, timepoint: float):
         assert from_kv_obj.evictor_data is not None
@@ -1188,7 +1205,12 @@ class OursSuperChunkEvictor(BaseEvictor):
         evictor_backend_no = local_backend_no - 1
         assert evictor_backend_no in [0, 1]
         # print(f"push to heap {evictor_backend_no} {to_kv_obj.evictor_data.item} in transform from {from_kv_obj.compression_level} to {to_kv_obj.compression_level}.")
-        if self._is_first_op_on_evict:
+        if self._pending_backward_op > 0:
+            self._pending_backward_op -= 1
+            if self._is_first_op_on_back:
+                self._is_first_op_on_back = False
+                self._heaps[evictor_backend_no].update_on_keychange(to_kv_obj.evictor_data)
+        elif self._is_first_op_on_evict:
             # Currently all transform or all transfer.
             ori_size = self._heaps[evictor_backend_no].size()
             assert self._pending_operation_counter > 0
@@ -1199,7 +1221,8 @@ class OursSuperChunkEvictor(BaseEvictor):
             # print(f"In transform and first op in evict, {evictor_backend_no} heap size {ori_size} --> {now_size}")
         # print(f"update_on_transform filling in [{evictor_backend_no}][{to_kv_obj.hash_value}]")
         self._from_hash_to_kv_obj[evictor_backend_no][to_kv_obj.hash_value] = to_kv_obj
-        self._pending_operation_counter -= 1
+        self._pending_operation_counter -= 1 # This includes backward ones.
+        # print(f"pending operation on transform: from {self._pending_operation_counter + 1} to {self._pending_operation_counter}")
         return EvictOpType.NONE, None
     
     def evict(self, local_backend_no: int):
@@ -1235,8 +1258,10 @@ class OursSuperChunkEvictor(BaseEvictor):
         # NOTE: reinit on compress and write_to_lower in advance here.
         if op_type == EvictOpType.COMPRESS:
             assert evict_super_chunk.total_size % evict_super_chunk.super_chunk_len == 0
+            ratio = self._compression_manager.multiply_rate_from_to(evict_super_chunk.compression_level, op_aux)
+            assert ratio < 1.0
             unit_size = evict_super_chunk.total_size // evict_super_chunk.super_chunk_len
-            unit_compressed_size = int(unit_size * self._compression_levels[op_aux][0])
+            unit_compressed_size = int(unit_size * ratio)
             new_total_size = unit_compressed_size * evict_super_chunk.super_chunk_len
             # print(f"new compress level {op_aux} new total size {new_total_size}")
             evict_super_chunk.reinit_on_compress(op_aux, new_total_size)
@@ -1258,6 +1283,7 @@ class OursSuperChunkEvictor(BaseEvictor):
                 assert op_aux is None
                 ret_list.append((op_type, kv_obj))
         self._pending_operation_counter = len(ret_list)
+        # print(f"pending operation on evict: {self._pending_operation_counter}")
         now_size = self._heaps[local_backend_no - 1].size()
         # print(f"Evict, {local_backend_no - 1} heap size {ori_size} --> {now_size}")
         return ret_list
