@@ -1153,7 +1153,8 @@ class OursSuperChunkEvictor(BaseEvictor):
         ret_list.append((store_to_layer, best_level))
         # print(f"get_store_info {ret_list}")
         if best_level != 0:
-            print(f"Store to layer {store_to_layer} with {best_level} compression, with max_prev is {previous_max_level}")
+            pass
+            # print(f"Store to layer {store_to_layer} with {best_level} compression, with max_prev is {previous_max_level}")
         return ret_list
     
     def update_on_transfer(self, from_kv_obj, to_kv_obj):
@@ -1228,7 +1229,7 @@ class OursSuperChunkEvictor(BaseEvictor):
         op_aux = None
         if len(best_op) > 1:
             assert op_type == EvictOpType.COMPRESS
-            print(f"Eviction compress to {best_op[1]}")
+            # print(f"Eviction compress to {best_op[1]}")
             op_aux = best_op[1]
         ret_list = []
         # NOTE: reinit on compress and write_to_lower in advance here.
