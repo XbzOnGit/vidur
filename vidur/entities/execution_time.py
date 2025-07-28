@@ -181,6 +181,7 @@ class ExecutionTime(BaseEntity):
     def model_time(self) -> float:
         # we are not counting the execution time for the embedding layer and last softmax layer
         block_execution_time = self._get_block_execution_time()
+        print(f"Computation per layer is {(block_execution_time - self._tensor_parallel_communication_time * 2) / 1000}")
         pipeline_stage_execution_time = (
             block_execution_time * self._num_layers_per_pipeline_stage
         )

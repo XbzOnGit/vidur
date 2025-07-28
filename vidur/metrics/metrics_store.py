@@ -381,16 +381,21 @@ class MetricsStore:
             file_name="request_metrics",
         )
 
+        # BUG: RuntimeError: can't register atexit after shutdown
+        """
         for dataseries in self._request_metrics_histogram.values():
             dataseries.plot_histogram(base_plot_path, dataseries._y_name)
 
         for dataseries in self._request_metrics_time_distributions.values():
             dataseries.plot_cdf(base_plot_path, dataseries._y_name, TIME_STR)
+        """
+        
 
     def _store_batch_metrics(self, base_plot_path: str):
         if not self._config.store_batch_metrics:
             return
 
+        """
         for dataseries in self._batch_metrics_time_distribution.values():
             y_axis_label = (
                 TIME_STR_MS
@@ -401,10 +406,13 @@ class MetricsStore:
 
         for dataseries in self._batch_metrics_count_distribution.values():
             dataseries.plot_cdf(base_plot_path, dataseries._metric_name, COUNT_STR)
+        """
 
         if not self._config.keep_individual_batch_metrics:
             return
 
+
+        """
         for dataseries in self._batch_metrics_time_distribution_per_batch.values():
             y_axis_label = (
                 TIME_STR_MS
@@ -425,6 +433,8 @@ class MetricsStore:
                 y_axis_label=COUNT_STR,
                 y_cumsum=False,
             ),
+        """
+        
 
         all_batch_metrics = list(
             self._batch_metrics_count_distribution_per_batch.values()
@@ -438,11 +448,12 @@ class MetricsStore:
         )
 
     def _store_completion_metrics(self, base_plot_path: str):
+        """
         if self._config.store_request_metrics:
-            for dataseries in self._request_completion_metrics_time_series.values():
-                dataseries.plot_step(
-                    base_plot_path, f"{dataseries._y_name}_time_series", COUNT_STR
-                )
+        for dataseries in self._request_completion_metrics_time_series.values():
+            dataseries.plot_step(
+                base_plot_path, f"{dataseries._y_name}_time_series", COUNT_STR
+            )
 
         if not self._config.store_token_completion_metrics:
             return
@@ -454,6 +465,8 @@ class MetricsStore:
             dataseries.plot_step(
                 base_plot_path, f"{dataseries._y_name}_time_series", COUNT_STR
             )
+        """
+        return
 
     def _store_utilization_metrics(self, base_plot_path: str):
         if not self._config.store_utilization_metrics:

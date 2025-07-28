@@ -28,6 +28,13 @@ class BaseExecutionTimePredictor(ABC):
         self._num_layers_per_pipeline_stage = (
             self._model_config.num_layers // self._replica_config.num_pipeline_stages
         )
+        self._communication_channel_factors = [
+            [1.0, 1.0] for _ in range(self._replica_config.num_pipeline_stages)] 
+        # [PP_stage_no][0 for PP, 1 for TP]
+        # Assuming one replica, because all links in that position change.
+        
+    def network_bandwidth_factor_assign(self, pipeline_stage: int, comm_id: int, factor: float):
+        self._communication_channel_factors[pipeline_stage][comm_id] = factor
 
     def get_execution_time(self, batch: Batch, pipeline_stage: int) -> ExecutionTime:
         if pipeline_stage == self._replica_config.num_pipeline_stages - 1:
@@ -36,6 +43,7 @@ class BaseExecutionTimePredictor(ABC):
             pipeline_parallel_communication_time = (
                 self._get_pipeline_parallel_communication_time(batch)
             )
+            pipeline_parallel_communication_time /= self._communication_channel_factors[pipeline_stage][0]
 
         if self._replica_config.tensor_parallel_size == 1:
             tensor_parallel_communication_time = 0
@@ -43,7 +51,8 @@ class BaseExecutionTimePredictor(ABC):
             tensor_parallel_communication_time = (
                 self._get_tensor_parallel_communication_time(batch)
             )
-
+            tensor_parallel_communication_time /= self._communication_channel_factors[pipeline_stage][1]
+        print(f"tp_time_in_half_layer: {tensor_parallel_communication_time / 1000}, pp_time: {pipeline_parallel_communication_time / 1000}")
         return ExecutionTime(
             self._num_layers_per_pipeline_stage,
             self._get_attention_rope_execution_time(batch),

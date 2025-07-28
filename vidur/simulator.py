@@ -5,10 +5,11 @@ from typing import List
 
 from vidur.config import SimulationConfig
 from vidur.entities import Cluster
-from vidur.events import BaseEvent, RequestArrivalEvent
+from vidur.events import BaseEvent, RequestArrivalEvent, NetworkChangeEvent
 from vidur.logger import init_logger
 from vidur.metrics import MetricsStore
 from vidur.request_generator import RequestGeneratorRegistry
+from vidur.network_generator import NetworkGeneratorRegistry
 from vidur.scheduler import BaseGlobalScheduler, GlobalSchedulerRegistry
 
 logger = init_logger(__name__)
@@ -34,7 +35,13 @@ class Simulator:
             self._config.metrics_config,
             self._config.request_generator_config,
         )
+        self._request_cnt = 0
+        self._network_change_cnt = 0
         self._metric_store = MetricsStore(self._config)
+        self._network_generator = NetworkGeneratorRegistry.get(
+            self._config.network_generator_config.get_type(),
+            self._config.network_generator_config,
+        )
         self._request_generator = RequestGeneratorRegistry.get(
             self._config.request_generator_config.get_type(),
             self._config.request_generator_config,
@@ -58,7 +65,8 @@ class Simulator:
 
     def run(self) -> None:
         logger.info(
-            f"Starting simulation with cluster: {self._cluster} and {len(self._event_queue)} requests"
+            f"Starting simulation with cluster: {self._cluster}, {self._network_change_cnt} network changes, "
+            f"and {self._request_cnt} requests"
         )
 
         while self._event_queue and not self._terminate:
@@ -101,10 +109,20 @@ class Simulator:
             self._add_event(event)
 
     def _init_event_queue(self) -> None:
+        # Init network changes first.
+        net_cs = self._network_generator.generate()
+        
+        for net_c in net_cs:
+            self._add_event(NetworkChangeEvent(net_c.arrived_at, 
+                                               net_c
+                                               ))
+            self._network_change_cnt += 1
+        
         requests = self._request_generator.generate()
 
         for request in requests:
             self._add_event(RequestArrivalEvent(request.arrived_at, request))
+            self._request_cnt += 1
 
     def _set_time(self, time: float) -> None:
         self._time = time

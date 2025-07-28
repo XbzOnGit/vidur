@@ -19,6 +19,7 @@ from vidur.types import (
     RequestGeneratorType,
     RequestIntervalGeneratorType,
     RequestLengthGeneratorType,
+    NetworkGeneratorType,
 )
 
 logger = init_logger(__name__)
@@ -621,6 +622,67 @@ class ClusterConfig:
         default_factory=SarathiSchedulerConfig,
         metadata={"help": "Replica scheduler config."},
     )
+    
+
+@dataclass
+class BaseNetworkGeneratorConfig(BasePolyConfig):
+    seed: int = field(
+        default=42,
+        metadata={"help": "Seed for the random number generator."},
+    )
+    
+@dataclass
+class TraceNetworkGeneratorConfig(BaseNetworkGeneratorConfig):
+    trace_file: str = field(
+        default="data/processed_traces/network_bandwidth.csv",
+        metadata={"help": "Path to the trace network generator file."},
+    )
+    bandwidth_scale_factor: float = field(
+        default=1.0,
+        metadata={"help": "Bandwidth scale factor for the trace network generator."},
+    )
+    time_scale_factor: float = field(
+        default=1.0,
+        metadata={"help": "Time scale factor for the trace network generator."},
+    )
+    max_bandwidth_factor: float = field(
+        default=1.0,
+        metadata={"help": "Maximum bandwidth factor for the network generator."},
+    )
+
+    @staticmethod
+    def get_type():
+        return NetworkGeneratorType.TRACE_REPLAY
+
+@dataclass
+class SyntheticNetworkGeneratorConfig(BaseNetworkGeneratorConfig):
+    # Code reuse.
+    #interval_generator_config: BaseRequestIntervalGeneratorConfig = field(
+    #    default_factory=PoissonRequestIntervalGeneratorConfig,
+    #    metadata={"help": "Interval generator config for Synthetic Network Generator."},
+    #)
+    # TODO: Write a special generator for bandwidth.
+    # bandwidth_factor_generator_config: BaseRequestIntervalGeneratorConfig = field(
+    #     default_factory=PoissonRequestIntervalGeneratorConfig,
+    #    metadata={"help": "Bandwidth factor config for Synthetic Network Generator."},
+    #)
+    # TODO: Configure pipeline stages and comm_id. Write special generators for them.
+    # Default to empty.
+    num_net_cs: Optional[int] = field(
+        default=0,
+        metadata={"help": "Number of network changes for Synthetic Network Generator."},
+    )
+   # duration: Optional[float] = field(
+    #    default=None,
+    #    metadata={"help": "Duration of the Synthetic Network generator."},
+    #)
+
+    def __post_init__(self):
+        self.max_bandwidth_factor = 1.0 # Now fix to 1.0
+
+    @staticmethod
+    def get_type():
+        return NetworkGeneratorType.SYNTHETIC
 
 
 @dataclass
@@ -640,6 +702,10 @@ class SimulationConfig(ABC):
     cluster_config: ClusterConfig = field(
         default_factory=ClusterConfig,
         metadata={"help": "Cluster config."},
+    )
+    network_generator_config: BaseNetworkGeneratorConfig = field(
+        default_factory=SyntheticNetworkGeneratorConfig,
+        metadata={"help": "Network generator config."},
     )
     request_generator_config: BaseRequestGeneratorConfig = field(
         default_factory=SyntheticRequestGeneratorConfig,

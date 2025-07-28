@@ -10,6 +10,7 @@ from vidur.types.replica_scheduler_type import ReplicaSchedulerType
 from vidur.types.request_generator_type import RequestGeneratorType
 from vidur.types.request_interval_generator_type import RequestIntervalGeneratorType
 from vidur.types.request_length_generator_type import RequestLengthGeneratorType
+from vidur.types.network_generator_type import NetworkGeneratorType
 
 __all__ = [
     EventType,
@@ -24,4 +25,5 @@ __all__ = [
     NormType,
     ActivationType,
     BaseIntEnum,
+    NetworkGeneratorType,
 ]

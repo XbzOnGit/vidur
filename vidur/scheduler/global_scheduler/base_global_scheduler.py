@@ -23,6 +23,7 @@ class BaseGlobalScheduler(ABC):
             replica_scheduler_config=config.cluster_config.replica_scheduler_config,
             metrics_config=config.metrics_config,
         )
+        self._execution_time_predictor = execution_time_predictor
         self._replica_schedulers = {
             replica_id: ReplicaSchedulerRegistry.get(
                 config.cluster_config.replica_scheduler_config.get_type(),
@@ -36,6 +37,10 @@ class BaseGlobalScheduler(ABC):
             for replica_id, replica in replicas.items()
         }
         self._request_queue = []
+        
+        
+    def get_execution_time_predictor(self):
+        return self._execution_time_predictor
 
     def sort_requests(self) -> None:
         self._request_queue.sort(key=lambda request: request._arrived_at)
