@@ -72,6 +72,7 @@ class SklearnExecutionTimePredictor(BaseExecutionTimePredictor):
         ), "Number of workers should be less than devices per node or a multiple of devices per node"
 
         self._is_multi_node = num_workers > devices_per_node
+        print(f"self._is_multi_node: {self._is_multi_node}")
 
         (
             self._compute_input_file,
