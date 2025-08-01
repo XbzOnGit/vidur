@@ -31,6 +31,57 @@ class BaseModelConfig(BaseFixedConfig):
 
 
 @dataclass
+class OPT175BModelConfig(BaseModelConfig):
+    num_layers: int = 96
+    num_q_heads: int = 96
+    num_kv_heads: int = 96
+    embedding_dim: int = 12288
+    mlp_hidden_dim: int = 49152
+    max_position_embeddings: int = 2048
+    use_gated_mlp: bool = False
+    use_bias: bool = True
+    use_qkv_bias: bool = True
+    activation: ActivationType = ActivationType.RELU
+    norm: NormType = NormType.LAYER_NORM
+    post_attn_norm: bool = False
+    vocab_size: int = 50272
+    
+    # No RoPE at all.
+    is_neox_style: Optional[bool] = False
+    rope_theta: Optional[float] = None
+    rope_scaling: Optional[Dict[str, Any]] = None
+    partial_rotary_factor: float = 1.0
+    # Allow TP.
+    no_tensor_parallel: bool = False
+    
+    
+
+"""
+@dataclass
+class Bloom176BModel(BaseModelConfig):
+    num_layers: int = 70
+    num_q_heads: int = 112
+    num_kv_heads: int = 112
+    embedding_dim: int = 14336
+    mlp_hidden_dim: int = 
+    activation: ActivationType = ActivationType.GELU
+    norm: NormType = NormType.LAYER_NORM
+    post_attn_norm: bool = True
+
+"""
+
+"""
+@dataclass
+class Falcon180BModel(BaseModelConfig):
+    num_layers: int = 80
+    num_q_heads: int = 232
+    num_kv_heads: int = 8
+    embedding_dim: int = 
+"""
+
+
+
+@dataclass
 class Llama2ModelConfig(BaseModelConfig):
     max_position_embeddings: int = 16384
     use_gated_mlp: bool = True
