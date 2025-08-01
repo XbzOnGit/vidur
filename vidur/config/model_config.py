@@ -54,6 +54,10 @@ class OPT175BModelConfig(BaseModelConfig):
     # Allow TP.
     no_tensor_parallel: bool = False
     
+    @staticmethod
+    def get_name():
+        return "meta/opt-175b"
+    
     
 
 """
