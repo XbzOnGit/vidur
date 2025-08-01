@@ -52,12 +52,12 @@ class ModelConfig:
         self.is_neox_style = is_neox_style
 
         assert self.norm in ["layer_norm", "rms_norm"]
-        assert self.activation in ["gelu", "silu"]
+        assert self.activation in ["gelu", "silu", "relu"]
 
         if self.use_gated_mlp:
             assert self.activation == "silu"
         else:
-            assert self.activation == "gelu"
+            assert self.activation == "gelu" or self.activation == "relu"
 
     @staticmethod
     def from_model_name(model_name: str):

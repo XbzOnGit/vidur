@@ -46,6 +46,7 @@ def parse_args():
             "meta-llama/Llama-2-7b-hf",
             "codellama/CodeLlama-34b-Instruct-hf",
             "meta-llama/Llama-2-70b-hf",
+            "meta/opt-175b",
         ],
         help="Models to profile",
     )
