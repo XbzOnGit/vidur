@@ -160,7 +160,8 @@ def profile_model(
                                  num_tensor_parallel_workers,
                                  args.profile_method,
                                  assign_idx,
-                                 args.output_dir
+                                 args.output_dir,
+                                 num_tokens
                                  )
                     promise = pool.apply_async(run_profiling_multiprocessing_task, args=task_args)
                     promises.append(promise)
