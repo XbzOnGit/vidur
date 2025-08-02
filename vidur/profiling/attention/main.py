@@ -8,14 +8,15 @@ import os
 import pandas as pd
 import ray
 import torch
-from sarathi.config import ParallelConfig
-from sarathi.model_executor.attention import AttentionBackend
-from tqdm import tqdm
 
 from vidur.profiling.attention.attention_input import AttentionInput
 from vidur.profiling.attention.attention_wrapper import AttentionWrapper
 from vidur.profiling.common.model_config import ModelConfig
 from vidur.profiling.utils import get_attention_input_combinations, get_max_num_blocks
+
+from sarathi.config import ParallelConfig
+from sarathi.model_executor.attention import AttentionBackend
+from tqdm import tqdm
 
 
 def parse_args():
