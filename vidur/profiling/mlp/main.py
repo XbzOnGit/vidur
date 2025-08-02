@@ -199,6 +199,9 @@ def main():
     )
 
     pbar = tqdm(total=len(list(total_combos)))
+    
+    if args.disable_ray:
+        multiprocessing.set_start_method('spawn', force=True)
 
     for model in args.models:
         result_df = profile_model(

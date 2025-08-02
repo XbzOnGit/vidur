@@ -252,6 +252,9 @@ def main():
         args.profile_only_prefill,
         args.profile_only_decode,
     )
+    
+    if args.disable_ray:
+        multiprocessing.set_start_method('spawn', force=True)
 
     total_combos = {}
     max_num_blocks_dict = {}
