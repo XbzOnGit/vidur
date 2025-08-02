@@ -126,6 +126,7 @@ def run_profiling_multiprocessing_task(
     attention_backend,
     dtype
 ):
+    global process_cached_wrapper
     if process_cached_wrapper is None:
         os.environ['KINETO_LOG_LEVEL'] = '5'
         os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_id)
