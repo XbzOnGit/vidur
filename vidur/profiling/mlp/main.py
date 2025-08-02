@@ -2,6 +2,7 @@ import argparse
 import datetime
 import itertools
 import os
+import multiprocessing
 from typing import Any, List
 
 import pandas as pd
@@ -78,6 +79,25 @@ def parse_args():
 
     return args
 
+process_cached_wrapper = None
+
+def run_profiling_multiprocessing_task(model_config,
+                                       num_tensor_parallel_workers: int,
+                                       profile_method,
+                                       rank,
+                                       output_dir,
+                                       num_tokens):
+    if process_cached_wrapper is None:
+        os.environ['KINETO_LOG_LEVEL'] = '5'
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
+        process_cached_wrapper = MlpWrapper(model_config, 
+                                            num_tensor_parallel_workers, 
+                                            profile_method,
+                                            rank,
+                                            output_dir)
+    return process_cached_wrapper.profile(num_tokens)
+        
+    
 
 def profile_model(
     args: argparse.Namespace, model: str, num_tokens_to_profile: List[int], pbar: Any
@@ -87,44 +107,72 @@ def profile_model(
     promises = []
     all_results = []
 
-    model_wrapper_actor = ray.remote(
-        num_cpus=1,
-        num_gpus=1,
-    )(
-        MlpWrapper,
-    ).options(runtime_env={"env_vars": {"KINETO_LOG_LEVEL": "5"}})
+    if not args.disable_ray:
+        model_wrapper_actor = ray.remote(
+            num_cpus=1,
+            num_gpus=1,
+        )(
+            MlpWrapper,
+        ).options(runtime_env={"env_vars": {"KINETO_LOG_LEVEL": "5"}})
 
-    for num_tensor_parallel_workers in args.num_tensor_parallel_workers:
-        if model_config.no_tensor_parallel and num_tensor_parallel_workers > 1:
-            pbar.update(len(num_tokens_to_profile))
-            continue
+        for num_tensor_parallel_workers in args.num_tensor_parallel_workers:
+            if model_config.no_tensor_parallel and num_tensor_parallel_workers > 1:
+                pbar.update(len(num_tokens_to_profile))
+                continue
 
-        model_wrappers = [
-            model_wrapper_actor.remote(
-                model_config,
-                num_tensor_parallel_workers,
-                args.profile_method,
-                rank,
-                args.output_dir,
-            )
-            for rank in range(args.num_gpus)
-        ]
-        for num_tokens in num_tokens_to_profile:
-            worker_id = len(promises)
-            promise = model_wrappers[worker_id].profile.remote(
-                num_tokens,
-            )
-            promises.append(promise)
+            model_wrappers = [
+                model_wrapper_actor.remote(
+                    model_config,
+                    num_tensor_parallel_workers,
+                    args.profile_method,
+                    rank,
+                    args.output_dir,
+                )
+                for rank in range(args.num_gpus)
+            ]
+            for num_tokens in num_tokens_to_profile:
+                worker_id = len(promises)
+                promise = model_wrappers[worker_id].profile.remote(
+                    num_tokens,
+                )
+                promises.append(promise)
 
-            if len(promises) >= args.num_gpus:
-                results = ray.get(promises)
-                all_results.extend(results)
-                promises = []
+                if len(promises) >= args.num_gpus:
+                    results = ray.get(promises)
+                    all_results.extend(results)
+                    promises = []
 
-            pbar.update(1)
+                pbar.update(1)
 
-    results = ray.get(promises)
-    all_results.extend(results)
+        results = ray.get(promises)
+        all_results.extend(results)
+    else:
+        with multiprocessing.Pool(processes=args.num_gpus) as pool:
+            assign_idx = 0
+            for num_tensor_parallel_workers in args.num_tensor_parallel_workers:
+                if model_config.no_tensor_parallel and num_tensor_parallel_workers > 1:
+                    pbar.update(len(num_tokens_to_profile))
+                    continue
+                
+                for num_tokens in num_tokens_to_profile:
+                    task_args = (model_config,
+                                 num_tensor_parallel_workers,
+                                 args.profile_method,
+                                 assign_idx,
+                                 args.output_dir
+                                 )
+                    promise = pool.apply_async(run_profiling_multiprocessing_task, args=task_args)
+                    promises.append(promise)
+
+                    if len(promises) >= args.num_gpus:
+                        results = [p.get() for p in promises]
+                        all_results.extend(results)
+                        promises = []
+                    assign_idx = (assign_idx + 1) % args.num_gpus
+                    pbar.update(1)
+
+            results = [p.get() for p in promises]
+            all_results.extend(results)
 
     df = pd.DataFrame(all_results)
     # the time_stats column is a dict, so we need to expand it into columns recursively and add prefix

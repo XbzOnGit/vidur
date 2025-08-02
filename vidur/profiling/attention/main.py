@@ -2,6 +2,8 @@ import argparse
 import datetime
 import os
 from typing import Any, List
+import multiprocessing
+import os
 
 import pandas as pd
 import ray
@@ -111,6 +113,34 @@ def parse_args():
     return args
 
 
+process_cached_wrapper = None
+
+def run_profiling_multiprocessing_task(
+    worker_id: int,
+    attention_input,
+    model_config,
+    parallel_config,
+    max_num_blocks: int,
+    max_model_len: int,
+    block_size: int,
+    attention_backend,
+    dtype
+):
+    if process_cached_wrapper is None:
+        os.environ['KINETO_LOG_LEVEL'] = '5'
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(worker_id)
+        process_cached_wrapper = AttentionWrapper(
+            model_config,
+            parallel_config,
+            max_num_blocks,
+            max_model_len,
+            block_size,
+            attention_backend,
+            dtype,
+        )
+    return process_cached_wrapper.profile(attention_input)
+
+
 def profile_model(
     args: argparse.Namespace,
     model: str,
@@ -129,41 +159,74 @@ def profile_model(
     promises = []
     all_results = []
 
-    model_wrapper_actor = ray.remote(
-        num_cpus=1,
-        num_gpus=1,
-    )(
-        AttentionWrapper,
-    ).options(runtime_env={"env_vars": {"KINETO_LOG_LEVEL": "5"}})
+    if not args.disable_ray:
+        model_wrapper_actor = ray.remote(
+            num_cpus=1,
+            num_gpus=1,
+        )(
+            AttentionWrapper,
+        ).options(runtime_env={"env_vars": {"KINETO_LOG_LEVEL": "5"}})
 
-    model_wrappers = [
-        model_wrapper_actor.remote(
-            model_config,
-            parallel_config,
-            max_num_blocks,
-            args.max_model_len,
-            args.block_size,
-            args.attention_backend,
-            dtype,
-        )
-        for _ in range(args.num_gpus)
-    ]
+        model_wrappers = [
+            model_wrapper_actor.remote(
+                model_config,
+                parallel_config,
+                max_num_blocks,
+                args.max_model_len,
+                args.block_size,
+                args.attention_backend,
+                dtype,
+            )
+            for _ in range(args.num_gpus)
+        ]
 
-    for attention_input in input_combinations:
-        worker_id = len(promises)
-        promise = model_wrappers[worker_id].profile.remote(attention_input)
-        promises.append(promise)
+        for attention_input in input_combinations:
+            worker_id = len(promises)
+            promise = model_wrappers[worker_id].profile.remote(attention_input)
+            promises.append(promise)
 
-        if len(promises) >= args.num_gpus:
-            results = ray.get(promises)
+            if len(promises) >= args.num_gpus:
+                results = ray.get(promises)
+                all_results.extend(results)
+                promises = []
+
+            pbar.update(1)
+
+        results = ray.get(promises)
+        all_results.extend(results)
+    else:
+        with multiprocessing.Pool(processes=args.num_gpus) as pool:
+            for i, attention_input in enumerate(input_combinations):
+                worker_id = i % args.num_gpus
+
+                task_args = (
+                    worker_id,
+                    attention_input,
+                    model_config,
+                    parallel_config,
+                    max_num_blocks,
+                    args.max_model_len,
+                    args.block_size,
+                    args.attention_backend,
+                    dtype,
+                )
+
+                # Asynchronously apply the function. This is non-blocking.
+                promise = pool.apply_async(run_profiling_multiprocessing_task, args=task_args)
+                promises.append(promise)
+
+                # When the number of pending tasks reaches the number of workers,
+                # wait for them to finish and collect the results.
+                if len(promises) >= args.num_gpus:
+                    results = [p.get() for p in promises]
+                    all_results.extend(results)
+                    promises = []
+
+                pbar.update(1)
+
+            # Collect results from any remaining tasks after the loop.
+            results = [p.get() for p in promises]
             all_results.extend(results)
-            promises = []
-
-        pbar.update(1)
-
-    results = ray.get(promises)
-    all_results.extend(results)
-
     # filter all none results
     all_results = list(filter(None, all_results))
 
