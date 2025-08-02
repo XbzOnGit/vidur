@@ -67,7 +67,11 @@ class CausalSelfAttention(torch.nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         with self._attn_rope_timer:
-            q, k = self.rotary_emb(positions, q, k)
+            if self.rotary_emb is not None:
+                q, k = self.rotary_emb(positions, q, k)
+            # Else just one embedding at the first layer, which 
+            # is read & addition.
+            # Now just ignore it.
         # output from attn has the same shape as q
         attn_output = torch.randn_like(q)
         output, _ = self.o_proj(attn_output)
