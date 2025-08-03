@@ -79,7 +79,7 @@ def parse_args():
 
     return args
 
-process_cached_wrapper = None
+process_cached_wrapper: MlpWrapper = None
 
 def run_profiling_multiprocessing_task(model_config,
                                        num_tensor_parallel_workers: int,
@@ -88,9 +88,10 @@ def run_profiling_multiprocessing_task(model_config,
                                        output_dir,
                                        num_tokens):
     global process_cached_wrapper
-    if process_cached_wrapper is None:
-        os.environ['KINETO_LOG_LEVEL'] = '5'
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
+    if process_cached_wrapper is None or process_cached_wrapper.num_tensor_parallel_workers != num_tensor_parallel_workers:
+        if process_cached_wrapper is None:
+            os.environ['KINETO_LOG_LEVEL'] = '5'
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
         process_cached_wrapper = MlpWrapper(model_config, 
                                             num_tensor_parallel_workers, 
                                             profile_method,
@@ -155,6 +156,7 @@ def profile_model(
                     pbar.update(len(num_tokens_to_profile))
                     continue
                 
+                # Need a new set of wrappers for every num_tensor_parallel_workers
                 for num_tokens in num_tokens_to_profile:
                     task_args = (model_config,
                                  num_tensor_parallel_workers,
